@@ -1,0 +1,27 @@
+[package]
+name = "rawgrep"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["dep:mimalloc"]
+
+[dependencies]
+regex = "1"
+memmap2 = "0.9"
+rayon = "1.8"
+smallvec = "1.15.1"
+mimalloc = { version = "=0.1.47", optional = true }
+ctrlc = "3.5.1"
+memchr = "2.7.6"
+
+[profile.release-fast]
+inherits = "release"
+opt-level = 3
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+debug = false
+strip = true
+overflow-checks = false
+
