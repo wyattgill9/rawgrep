@@ -14,6 +14,7 @@ smallvec = "1.15.1"
 mimalloc = { version = "=0.1.47", optional = true }
 ctrlc = "3.5.1"
 memchr = "2.7.6"
+nohash-hasher = "0.2.0"
 
 [profile.release-fast]
 inherits = "release"
