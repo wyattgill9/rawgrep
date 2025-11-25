@@ -20,6 +20,8 @@ aho-corasick = "1.1.4"
 memmem = "0.1.1"
 libc = "0.2.177"
 ignore = "0.4.25"
+phf = { version = "0.13.1", features = ["macros"] }
+bytecount = "0.6.9"
 
 [profile.release-fast]
 inherits = "release"
@@ -30,3 +32,4 @@ lto = "fat"
 debug = false
 strip = true
 overflow-checks = false
+debug-assertions = false
