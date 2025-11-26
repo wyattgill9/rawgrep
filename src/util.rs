@@ -1,3 +1,9 @@
+use crate::GitignoreFrame;
+
+use std::path::Path;
+
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+
 #[inline(always)]
 pub const fn is_dot_entry(name: &[u8]) -> bool {
     name.len() == 1 && name[0] == b'.' ||
@@ -49,6 +55,25 @@ pub fn truncate_utf8(s: &[u8], max: usize) -> &[u8] {
     &s[..end]
 }
 
+#[inline]
+pub fn format_bytes(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+
+    let b = bytes as f64;
+
+    if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.2} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.2} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 // ---------------
 // Nightly implementation
 // ----------------------
@@ -79,11 +104,6 @@ mod imp {
     pub const fn unlikely(b: bool) -> bool { b }
 }
 
-use std::path::Path;
-
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
 pub use imp::*;
-
-use crate::GitignoreFrame;
 
 

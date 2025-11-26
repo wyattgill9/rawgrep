@@ -1,8 +1,8 @@
 use std::io;
 
-use aho_corasick::AhoCorasick;
-use memchr::memmem::Finder;
 use regex::bytes::Regex;
+use memchr::memmem::Finder;
+use aho_corasick::AhoCorasick;
 
 #[inline]
 fn extract_literal(pattern: &str) -> Option<Vec<u8>> {

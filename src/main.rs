@@ -12,10 +12,12 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod util;
 mod binary;
+mod writer;
 mod matcher;
 mod path_buf;
 
 use crate::matcher::Matcher;
+use crate::writer::SmoothWriter;
 use crate::path_buf::FixedPathBuf;
 use crate::binary::{is_binary_chunk, is_binary_ext};
 use crate::util::{
@@ -32,8 +34,8 @@ use crate::util::{
 use std::sync::Arc;
 use std::fmt::Display;
 use std::os::fd::AsRawFd;
+use std::io::{self, Write};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufWriter, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use smallvec::{SmallVec, smallvec};
@@ -43,8 +45,19 @@ use memmap2::{Mmap, MmapOptions};
 const BINARY_CONTROL_COUNT: usize = 51; // tunned
 const BINARY_PROBE_BYTE_SIZE: usize = 0x1000;
 
+const NON_TTY_BATCH_SIZE: usize = 0x8000; // tunned
+const TTY_BATCH_SIZE: usize = 0x1000; // tunned
+
+const MAX_EXTENTS_UNTIL_SPILL: usize = 64;
+
+const PATH_VERY_LONG_LENGTH: usize = 0x1000;
+
 const MAX_DIR_BYTE_SIZE: usize = 16 * 1024 * 1024;
 const MAX_FILE_BYTE_SIZE: usize = 5 * 1024 * 1024;
+const MAX_SYMLINK_TARGET_SIZE: usize = 4096;
+const FAST_SYMLINK_SIZE: usize = 60; // Symlinks < 60 bytes stored in inode
+
+const BLKGETSIZE64: libc::c_ulong = 0x80081272;
 
 const EXT4_SUPERBLOCK_OFFSET: u64 = 1024;
 const EXT4_SUPERBLOCK_SIZE: usize = 1024;
@@ -59,6 +72,7 @@ const EXT4_ROOT_INODE: INodeNum = 2;
 const EXT4_DESC_SIZE_OFFSET: usize = 254;
 const EXT4_INODE_MODE_OFFSET: usize = 0;
 const EXT4_INODE_SIZE_OFFSET_LOW: usize = 4;
+const EXT4_INODE_SIZE_OFFSET_HIGH: usize = 108;
 const EXT4_INODE_BLOCK_OFFSET: usize = 40;
 const EXT4_INODE_FLAGS_OFFSET: usize = 32;
 
@@ -71,8 +85,13 @@ const EXT4_S_IFDIR: u16 = 0x4000;
 
 const EXT4_EXTENTS_FL: u32 = 0x80000;
 
+const EXT4_EXTENT_MAGIC: u16 = 0xF30A;
+const EXT4_EXTENT_HEADER_SIZE: usize = 12;
+const EXT4_EXTENT_ENTRY_SIZE: usize = 12;
+
 const COLOR_RED: &str = "\x1b[1;31m";
 const COLOR_GREEN: &str = "\x1b[1;32m";
+const COLOR_BLUE: &str = "\x1b[1;34m";
 const COLOR_CYAN: &str = "\x1b[1;36m";
 const COLOR_RESET: &str = "\x1b[0m";
 
@@ -80,7 +99,6 @@ const CURSOR_HIDE: &str = "\x1b[?25l";
 const CURSOR_UNHIDE: &str = "\x1b[?25h";
 
 type INodeNum = u32;
-type BlockNum = u32;
 
 /// Helper used to indicate that we copy some amount of copiable data (bytes) into a newly allocated memory
 #[inline(always)]
@@ -103,64 +121,6 @@ struct DirFrame {
 }
 
 struct GitignoreFrame { matcher: Gitignore }
-
-pub struct BatchWriter<const BATCH_SIZE: usize = 0x8000> {
-    writer: BufWriter<io::Stdout>,
-    size_since_last_flush: usize,
-}
-
-impl<const BATCH_SIZE: usize> Default for BatchWriter<BATCH_SIZE> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const BATCH_SIZE: usize> BatchWriter<BATCH_SIZE> {
-    #[inline(always)]
-    pub fn new() -> Self {
-        Self {
-            writer: BufWriter::with_capacity(BATCH_SIZE, io::stdout()),
-            size_since_last_flush: 0,
-        }
-    }
-
-    #[inline(always)]
-    pub fn write_int(&mut self, mut n: usize) -> io::Result<usize> {
-        let mut buf = [0u8; 20]; // max digits for u64
-        let mut i = buf.len();
-
-        if n == 0 {
-            return self.writer.write(b"0");
-        }
-
-        while n > 0 {
-            i -= 1;
-            buf[i] = b'0' + (n % 10) as u8;
-            n /= 10;
-        }
-
-        self.writer.write(&buf[i..])
-    }
-
-    #[inline(always)]
-    pub fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        self.writer.write_all(data)?;
-        self.size_since_last_flush += data.len();
-
-        if self.size_since_last_flush >= BATCH_SIZE {
-            self.flush()?;
-        }
-
-        Ok(())
-    }
-
-    #[inline(always)]
-    pub fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()?;
-        self.size_since_last_flush = 0;
-        Ok(())
-    }
-}
 
 #[derive(Debug)]
 struct Ext4SuperBlock {
@@ -187,18 +147,21 @@ struct Ext4Inode {
     mode: u16,
     size: u64,
     flags: u32,
-    blocks: [BlockNum; 15],
+    blocks: [u32; 15],
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Ext4Extent {
-    start_lo: u32,
+    start: u64,
     len: u16,
 }
 
 #[derive(Default)]
 struct Stats {
     bytes_searched: usize,
+
+    symlinks_followed: usize,
+    symlinks_broken: usize,
 
     files_encountered: usize,
     files_searched: usize,
@@ -222,9 +185,11 @@ impl Display for Stats {
             + self.dirs_skipped_common
             + self.dirs_skipped_gitignore;
 
-        writeln!(f, "\n\x1b[1;32mSearch complete\x1b[0m")?;
+        let total_symlinks = self.symlinks_followed + self.symlinks_broken;
 
-        writeln!(f, "\x1b[1;34mFiles Summary:\x1b[0m")?;
+        writeln!(f, "\n{COLOR_GREEN}Search complete{COLOR_RESET}")?;
+
+        writeln!(f, "{COLOR_BLUE}Files Summary:{COLOR_RESET}")?;
         macro_rules! file_row {
             ($label:expr, $count:expr) => {
                 let pct = if total_files == 0 { 0.0 } else { ($count as f64 / total_files as f64) * 100.0 };
@@ -241,16 +206,29 @@ impl Display for Stats {
         file_row!("Skipped (unreadable)", self.files_skipped_unreadable);
         file_row!("Skipped (gitignore)", self.files_skipped_gitignore);
 
-        writeln!(f, "\n\x1b[1;34mBytes Summary:\x1b[0m")?;
+        if total_symlinks > 0 {
+            writeln!(f, "\n{COLOR_BLUE}Symlinks Summary:{COLOR_RESET}")?;
+            macro_rules! symlink_row {
+                ($label:expr, $count:expr) => {
+                    let pct = if total_symlinks == 0 { 0.0 } else { ($count as f64 / total_symlinks as f64) * 100.0 };
+                    writeln!(f, "  {:<25} {:>8} ({:>5.1}%)", $label, $count, pct)?;
+                };
+            }
+            symlink_row!("Total symlinks", total_symlinks);
+            symlink_row!("Followed successfully", self.symlinks_followed);
+            symlink_row!("Broken/skipped", self.symlinks_broken);
+        }
+
+        writeln!(f, "\n{COLOR_BLUE}Bytes Summary:{COLOR_RESET}")?;
         macro_rules! bytes_row {
             ($label:expr, $count:expr) => {
-                writeln!(f, "  {:<25} {:>12}", $label, $count)?;
+                writeln!(f, "  {:<25} {:>12}", $label, $crate::util::format_bytes($count))?;
             };
         }
 
         bytes_row!("Bytes searched", self.bytes_searched);
 
-        writeln!(f, "\n\x1b[1;34mDirectories Summary:\x1b[0m")?;
+        writeln!(f, "\n{COLOR_BLUE}Directories Summary:{COLOR_RESET}")?;
         macro_rules! dir_row {
             ($label:expr, $count:expr) => {
                 let pct = if total_dirs == 0 { 0.0 } else { ($count as f64 / total_dirs as f64) * 100.0 };
@@ -272,7 +250,7 @@ struct RawGrepper {
 
     stats: Stats,
 
-    writer: BatchWriter,
+    writer: SmoothWriter,
     matcher: Matcher,
 
     // ------------- reused buffers
@@ -294,9 +272,7 @@ impl RawGrepper {
     ) -> io::Result<Self> {
         #[inline]
         fn device_size(fd: &File) -> io::Result<u64> {
-            const BLKGETSIZE64: libc::c_ulong = 0x80081272;
-
-            let mut size: u64 = 0;
+            let mut size = 0u64;
             let res = unsafe {
                 libc::ioctl(fd.as_raw_fd(), BLKGETSIZE64, &mut size)
             };
@@ -345,7 +321,6 @@ impl RawGrepper {
                 .map(&file)?
         };
 
-        #[cfg(unix)]
         unsafe {
             libc::madvise(
                 mmap.as_ptr() as *mut _,
@@ -378,7 +353,7 @@ impl RawGrepper {
             sb: superblock,
             matcher,
             path_buf: FixedPathBuf::from_bytes(search_root_path.as_bytes()),
-            writer: BatchWriter::new(),
+            writer: SmoothWriter::new(),
             stats: Stats::default(),
             dir_name_buf: Vec::default(),
             dir_buf: Vec::default(),
@@ -467,7 +442,7 @@ impl RawGrepper {
         mut self,
         root_inode: INodeNum,
         path_display_buf: &mut String,
-        running: &Arc<AtomicBool>,
+        running: &AtomicBool,
         root_gitignore: Gitignore,
     ) -> io::Result<Stats> {
         let mut dir_stack = Vec::with_capacity(1024);
@@ -578,8 +553,10 @@ impl RawGrepper {
         let bytes_to_check = file_size.min(BINARY_PROBE_BYTE_SIZE);
 
         if inode.flags & EXT4_EXTENTS_FL != 0 {
-            if self.parse_extents(inode).is_ok() && let Some(extent) = self.extent_buf.first() {
-                let block = self.get_block(extent.start_lo);
+            if likely(self.parse_extents(inode).is_ok())
+                && let Some(extent) = self.extent_buf.first()
+            {
+                let block = self.get_block(extent.start);
                 let first_block_file_bytes = file_size.min(block.len());
                 let to_check = first_block_file_bytes.min(bytes_to_check);
                 return is_binary_chunk(&block[..to_check]);
@@ -587,7 +564,7 @@ impl RawGrepper {
         } else {
             for &block_num in inode.blocks.iter().take(12) {
                 if block_num != 0 {
-                    let block = self.get_block(block_num);
+                    let block = self.get_block(block_num.into());
                     let first_block_file_bytes = file_size.min(block.len());
                     let to_check = first_block_file_bytes.min(bytes_to_check);
                     return is_binary_chunk(&block[..to_check]);
@@ -648,7 +625,7 @@ impl RawGrepper {
 
     // @Hot
     #[inline(always)]
-    fn get_block(&self, block_num: BlockNum) -> &[u8] {
+    fn get_block(&self, block_num: u64) -> &[u8] {
         let offset = (block_num as usize).wrapping_mul(self.sb.block_size as usize);
         debug_assert!(
             self.device_mmap
@@ -661,9 +638,8 @@ impl RawGrepper {
         }
     }
 
-    #[cfg(unix)]
     #[inline(always)]
-    fn prefetch_blocks(&self, blocks: &[BlockNum]) {
+    fn prefetch_blocks(&self, blocks: &[u64]) {
         if blocks.is_empty() {
             return;
         }
@@ -687,9 +663,8 @@ impl RawGrepper {
         self.advise_range(range_start, range_end);
     }
 
-    #[cfg(unix)]
     #[inline(always)]
-    fn advise_range(&self, start_block: BlockNum, end_block: BlockNum) {
+    fn advise_range(&self, start_block: u64, end_block: u64) {
         let offset = start_block as usize * self.sb.block_size as usize;
         let length = (end_block - start_block + 1) as usize * self.sb.block_size as usize;
 
@@ -707,7 +682,10 @@ impl RawGrepper {
     #[inline]
     fn read_inode(&mut self, inode_num: INodeNum) -> io::Result<Ext4Inode> {
         if unlikely(inode_num == 0) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid inode number 0"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid inode number 0"
+            ));
         }
 
         let group = (inode_num - 1) / self.sb.inodes_per_group;
@@ -724,7 +702,7 @@ impl RawGrepper {
             bg_desc_offset + self.sb.desc_size as usize
         ];
 
-        let inode_table_block = BlockNum::from_le_bytes([
+        let inode_table_block = u32::from_le_bytes([
             bg_desc[EXT4_INODE_TABLE_OFFSET + 0],
             bg_desc[EXT4_INODE_TABLE_OFFSET + 1],
             bg_desc[EXT4_INODE_TABLE_OFFSET + 2],
@@ -753,6 +731,21 @@ impl RawGrepper {
             inode_bytes[EXT4_INODE_SIZE_OFFSET_LOW + 3],
         ]);
 
+        let size_high = if self.sb.inode_size > 128
+            && inode_bytes.len() > EXT4_INODE_SIZE_OFFSET_HIGH + 4
+        {
+            u32::from_le_bytes([
+                inode_bytes[EXT4_INODE_SIZE_OFFSET_HIGH + 0],
+                inode_bytes[EXT4_INODE_SIZE_OFFSET_HIGH + 1],
+                inode_bytes[EXT4_INODE_SIZE_OFFSET_HIGH + 2],
+                inode_bytes[EXT4_INODE_SIZE_OFFSET_HIGH + 3],
+            ])
+        } else {
+            0
+        };
+
+        let size = ((size_high as u64) << 32) | (size_low as u64);
+
         let flags = u32::from_le_bytes([
             inode_bytes[EXT4_INODE_FLAGS_OFFSET + 0],
             inode_bytes[EXT4_INODE_FLAGS_OFFSET + 1],
@@ -763,7 +756,7 @@ impl RawGrepper {
         let mut blocks = [0; 15];
         for (i, block) in blocks.iter_mut().enumerate() {
             let offset = EXT4_INODE_BLOCK_OFFSET + i * 4;
-            *block = BlockNum::from_le_bytes([
+            *block = u32::from_le_bytes([
                 inode_bytes[offset + 0],
                 inode_bytes[offset + 1],
                 inode_bytes[offset + 2],
@@ -771,7 +764,7 @@ impl RawGrepper {
             ]);
         }
 
-        Ok(Ext4Inode { mode, size: size_low as u64, flags, blocks })
+        Ok(Ext4Inode { mode, size, flags, blocks })
     }
 
     #[inline]
@@ -779,7 +772,7 @@ impl RawGrepper {
         self.extent_buf.clear();
 
         let mut block_bytes: SmallVec<[_; 64]> = smallvec![0; 64];
-        for (i, bytes) in inode.blocks.into_iter().map(BlockNum::to_le_bytes).enumerate() {
+        for (i, bytes) in inode.blocks.into_iter().map(u32::to_le_bytes).enumerate() {
             block_bytes[i * 4 + 0] = bytes[0];
             block_bytes[i * 4 + 1] = bytes[1];
             block_bytes[i * 4 + 2] = bytes[2];
@@ -791,12 +784,12 @@ impl RawGrepper {
     }
 
     fn parse_extent_node(&mut self, data: &[u8], level: usize) -> io::Result<()> {
-        if data.len() < 12 {
+        if data.len() < EXT4_EXTENT_HEADER_SIZE {
             return Ok(());
         }
 
         let magic = u16::from_le_bytes([data[0], data[1]]);
-        if magic != 0xF30A {
+        if magic != EXT4_EXTENT_MAGIC {
             return Ok(());
         }
 
@@ -806,8 +799,8 @@ impl RawGrepper {
         if depth == 0 {
             // -------- Leaf node
             for i in 0..entries {
-                let base = 12 + (i as usize * 12);
-                if base + 12 > data.len() {
+                let base = EXT4_EXTENT_ENTRY_SIZE + (i as usize * EXT4_EXTENT_ENTRY_SIZE);
+                if base + EXT4_EXTENT_ENTRY_SIZE > data.len() {
                     break;
                 }
 
@@ -824,14 +817,14 @@ impl RawGrepper {
 
                 if ee_len > 0 && ee_len <= 32768 {
                     self.extent_buf.push(Ext4Extent {
-                        start_lo: start_block as BlockNum,
+                        start: start_block,
                         len: ee_len,
                     });
                 }
             }
         } else {
             // -------- Internal node - collect block numbers first
-            let mut child_blocks = SmallVec::<[BlockNum; 16]>::new();
+            let mut child_blocks = SmallVec::<[_; 16]>::new();
             for i in 0..entries {
                 let base = 12 + (i as usize * 12);
                 if base + 12 > data.len() {
@@ -847,14 +840,13 @@ impl RawGrepper {
                 let ei_leaf_hi = u16::from_le_bytes([data[base + 8], data[base + 9]]);
 
                 let leaf_block = ((ei_leaf_hi as u64) << 32) | (ei_leaf_lo as u64);
-                child_blocks.push(leaf_block as BlockNum);
+                child_blocks.push(leaf_block);
             }
 
-            #[cfg(unix)]
             self.prefetch_blocks(&child_blocks);
 
             for child_block in child_blocks {
-                let block_data = self.get_block(child_block);
+                let block_data = self.get_block(child_block.into());
                 let block_copy: SmallVec<[_; 4096]> = copy_data(block_data);
                 self.parse_extent_node(&block_copy, level + 1)?;
             }
@@ -863,7 +855,6 @@ impl RawGrepper {
         Ok(())
     }
 
-    #[inline]
     fn process_directory(
         &mut self,
         inode: &Ext4Inode,
@@ -940,7 +931,6 @@ impl RawGrepper {
         Ok(())
     }
 
-    #[inline]
     fn process_entry(
         &mut self,
         entry_inode: INodeNum,
@@ -975,7 +965,6 @@ impl RawGrepper {
 
         match ft {
             EXT4_S_IFDIR => {
-                // ----- Directory - push to stack
                 let name_offset = self.dir_name_buf.len();
                 self.dir_name_buf.extend_from_slice(name);
                 let name_len = name.len();
@@ -988,7 +977,6 @@ impl RawGrepper {
                 });
             }
             EXT4_S_IFREG => {
-                // ----- Regular file - search it
                 self.process_file(
                     &child_inode,
                     name,
@@ -997,15 +985,55 @@ impl RawGrepper {
                 )?;
             }
             EXT4_S_IFLNK => {
-                // TODO: Process symlink targets
-                self.stats.files_encountered += 1;
+                self.process_symlink(
+                    &child_inode,
+                    name,
+                    path_display_buf,
+                    gi_stack,
+                    current_dir_path_len
+                ).inspect_err(|_| {
+                    self.stats.symlinks_broken += 1;
+                })?;
             }
             _ => {
-                // Skip special files (devices, FIFOs, sockets, etc.)
+                // ... skip special files (devices, FIFOs, sockets, etc.)
             }
         }
 
         self.path_buf.truncate(current_dir_path_len);
+
+        Ok(())
+    }
+
+    #[inline]
+    fn process_symlink(
+        &mut self,
+        child_inode: &Ext4Inode,
+        name: &[u8],
+        path_display_buf: &mut String,
+        gi_stack: &[GitignoreFrame],
+        current_dir_path_len: usize
+    ) -> io::Result<()> {
+        if unlikely(current_dir_path_len > self.path_buf.capacity()) {
+            self.stats.symlinks_broken += 1;
+            return Ok(());
+        }
+
+        let target_inode_num = self.resolve_symlink(&child_inode, current_dir_path_len)?;
+        let target_inode = self.read_inode(target_inode_num)?;
+        let target_ft = target_inode.mode & EXT4_S_IFMT;
+
+        if target_ft == EXT4_S_IFREG {
+            self.stats.symlinks_followed += 1;
+            self.process_file(
+                &target_inode,
+                name,
+                path_display_buf,
+                gi_stack,
+            )?;
+        } else {
+            // ... skip directory symlinks to avoid potential loops
+        }
 
         Ok(())
     }
@@ -1069,7 +1097,7 @@ impl RawGrepper {
     ) -> bool {
         if let Ok(gi_inode) = self.read_inode(gi_inode_num) {
             let size = (gi_inode.size as usize).min(MAX_FILE_BYTE_SIZE);
-            if self.read_file_into_buf(&gi_inode, size, BufKind::Gitignore).is_ok() {
+            if likely(self.read_file_into_buf(&gi_inode, size, BufKind::Gitignore).is_ok()) {
                 let matcher = build_gitignore_from_bytes(
                     path_display_buf.as_ref(),
                     &self.gitignore_buf,
@@ -1087,12 +1115,12 @@ impl RawGrepper {
         let size_to_read = (inode.size as usize).min(max_size);
         buf.reserve(size_to_read);
 
-        let copy_block_to_buf = |this: &mut RawGrepper, block_num: BlockNum| {
+        let copy_block_to_buf = |this: &mut RawGrepper, block_num: u64| {
             let offset = this.get_buf(kind).len();
             let remaining = size_to_read - offset;
 
             let (src_ptr, to_copy) = {
-                let block_data = this.get_block(block_num);
+                let block_data = this.get_block(block_num.into());
                 let to_copy = block_data.len().min(remaining);
                 (block_data.as_ptr(), to_copy)
             };
@@ -1116,8 +1144,6 @@ impl RawGrepper {
         };
 
         if inode.flags & EXT4_EXTENTS_FL != 0 {
-            const MAX_EXTENTS_UNTIL_SPILL: usize = 64;
-
             self.parse_extents(inode)?;
 
             let extent_count = self.extent_buf.len();
@@ -1132,7 +1158,7 @@ impl RawGrepper {
                 );
                 for extent in &extents_copy {
                     for i in 0..extent.len.min((MAX_EXTENTS_UNTIL_SPILL / extents_copy.len().max(1)) as _) {
-                        blocks_to_prefetch.push(extent.start_lo + i as BlockNum);
+                        blocks_to_prefetch.push(extent.start + i as u64);
                         if blocks_to_prefetch.len() >= MAX_EXTENTS_UNTIL_SPILL {
                             break;
                         }
@@ -1153,7 +1179,7 @@ impl RawGrepper {
                         break;
                     }
 
-                    let phys_block = extent.start_lo + j as BlockNum;
+                    let phys_block = extent.start + j as u64;
                     copy_block_to_buf(self, phys_block);
                 }
             }
@@ -1165,7 +1191,7 @@ impl RawGrepper {
                 );
                 for &block in inode.blocks.iter().take(EXT4_BLOCK_POINTERS_COUNT) {
                     if block != 0 {
-                        blocks_to_prefetch.push(block);
+                        blocks_to_prefetch.push(block as _);
                     }
                 }
                 self.prefetch_blocks(&blocks_to_prefetch);
@@ -1176,12 +1202,96 @@ impl RawGrepper {
                     break;
                 }
 
-                copy_block_to_buf(self, block);
+                copy_block_to_buf(self, block.into());
             }
         }
 
         self.get_buf_mut(kind).truncate(size_to_read);
         Ok(())
+    }
+
+    /// Resolve a symlink to its target inode number
+    #[inline]
+    fn resolve_symlink(
+        &mut self,
+        inode: &Ext4Inode,
+        current_dir_len: usize
+    ) -> io::Result<INodeNum> {
+        if unlikely(current_dir_len > PATH_VERY_LONG_LENGTH) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Path too long (possible symlink loop)"
+            ));
+        }
+
+        // symlink targets < `FAST_SYMLINK_SIZE` bytes are stored directly in inode.blocks
+        if inode.size < FAST_SYMLINK_SIZE as u64 {
+            let target = unsafe {
+                std::slice::from_raw_parts(
+                    inode.blocks.as_ptr() as *const u8,
+                    inode.size as usize
+                )
+            };
+            return self.resolve_symlink_target(target, current_dir_len);
+        }
+
+        // slow symlinks: target stored in file blocks
+        let size = (inode.size as usize).min(MAX_SYMLINK_TARGET_SIZE);
+        self.read_file_into_buf(inode, size, BufKind::Content)?;
+
+        let target: SmallVec<[_; 256]> = copy_data(&self.content_buf[..]);
+        self.resolve_symlink_target(&target, current_dir_len)
+    }
+
+    /// Resolve the symlink target path to an inode number
+    fn resolve_symlink_target(
+        &mut self,
+        target: &[u8],
+        current_dir_len: usize
+    ) -> io::Result<INodeNum> {
+        if target.first() == Some(&b'/') {
+            // This is an absolute path
+            let path_str = String::from_utf8_lossy(target);
+            return self.try_resolve_path_to_inode(&path_str);
+        }
+
+        let current_dir = &self.path_buf.as_bytes()[..current_dir_len];
+
+        let mut resolved_path = SmallVec::<[_; 512]>::new();
+        resolved_path.extend_from_slice(current_dir);
+
+        for component in target.split(|&b| b == b'/') {
+            if component.is_empty() || component == b"." {
+                continue;
+            }
+
+            if component == b".." {
+                // Go up one directory - find last '/'
+                if let Some(pos) = resolved_path.iter().rposition(|&b| b == b'/') {
+                    resolved_path.truncate(pos);
+                } else {
+                    // Already at root
+                    resolved_path.clear();
+                }
+                continue;
+            }
+
+            // Add component to path
+            if !resolved_path.is_empty() && resolved_path.last() != Some(&b'/') {
+                resolved_path.push(b'/');
+            }
+            resolved_path.extend_from_slice(component);
+
+            if unlikely(resolved_path.len() > PATH_VERY_LONG_LENGTH) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Path too long during symlink resolution"
+                ));
+            }
+        }
+
+        let path_str = String::from_utf8_lossy(&resolved_path);
+        self.try_resolve_path_to_inode(&path_str)
     }
 
     #[inline]
@@ -1205,7 +1315,7 @@ impl RawGrepper {
                 break;
             }
 
-            // Quick check: .gitignore is exactly 10 bytes
+            // @Quickcheck: .gitignore is exactly 10 bytes
             if entry_inode != 0 && name_len == 10 {
                 let name_end = offset + 8 + 10;
                 if name_end <= offset + rec_len as usize &&
@@ -1224,7 +1334,6 @@ impl RawGrepper {
         None
     }
 
-    #[inline]
     fn find_and_print_matches(&mut self, path: &str) -> io::Result<()> {
         let buf = &self.content_buf;
         if unlikely(!self.matcher.is_match(buf)) {
@@ -1400,7 +1509,7 @@ fn main() -> io::Result<()> {
 
     let stats = reader.search(
         start_inode,
-        &mut dir_path.to_string(),
+        &mut dir_path.to_owned(),
         &setup_signal_handler(),
         build_gitignore(dir_path.as_ref())
     )?;

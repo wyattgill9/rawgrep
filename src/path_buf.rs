@@ -45,6 +45,11 @@ impl<const N: usize> FixedPathBuf<N> {
     }
 
     #[inline(always)]
+    pub fn capacity(&self) -> usize {
+        N
+    }
+
+    #[inline(always)]
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.len]
     }
