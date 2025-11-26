@@ -61,7 +61,9 @@ const EXT4_BLOCK_POINTERS_COUNT: usize = 12;
 
 const EXT4_S_IFMT: u16 = 0xF000;
 const EXT4_S_IFREG: u16 = 0x8000;
+const EXT4_S_IFLNK: u16 = 0xA000;
 const EXT4_S_IFDIR: u16 = 0x4000;
+
 const EXT4_EXTENTS_FL: u32 = 0x80000;
 
 const COLOR_RED: &str = "\x1b[1;31m";
@@ -185,6 +187,8 @@ struct Ext4Extent {
 
 #[derive(Default)]
 struct Stats {
+    bytes_searched: usize,
+
     files_encountered: usize,
     files_searched: usize,
     files_contained_matches: usize,
@@ -225,6 +229,15 @@ impl Display for Stats {
         file_row!("Skipped (binary probe)", self.files_skipped_as_binary_due_to_probe);
         file_row!("Skipped (unreadable)", self.files_skipped_unreadable);
         file_row!("Skipped (gitignore)", self.files_skipped_gitignore);
+
+        writeln!(f, "\n\x1b[1;34mBytes Summary:\x1b[0m")?;
+        macro_rules! bytes_row {
+            ($label:expr, $count:expr) => {
+                writeln!(f, "  {:<25} {:>12}", $label, $count)?;
+            };
+        }
+
+        bytes_row!("Bytes searched", self.bytes_searched);
 
         writeln!(f, "\n\x1b[1;34mDirectories Summary:\x1b[0m")?;
         macro_rules! dir_row {
@@ -926,28 +939,37 @@ impl RawGrepper {
 
         let ft = child_inode.mode & EXT4_S_IFMT;
 
-        if ft == EXT4_S_IFDIR {
-            // ------ Store directory name in shared buffer
-            let name_offset = self.dir_name_buf.len();
-            self.dir_name_buf.extend_from_slice(name);
-            let name_len = name.len();
+        match ft {
+            EXT4_S_IFDIR => {
+                // ----- Directory - push to stack
+                let name_offset = self.dir_name_buf.len();
+                self.dir_name_buf.extend_from_slice(name);
+                let name_len = name.len();
 
-            // ----- For directories: push with name stored in buffer
-            dir_stack.push(DirFrame {
-                inode_num: entry_inode,
-                parent_len: current_dir_path_len, // parent path length (before this dir)
-                name_offset,
-                name_len,
-            });
-        } else if likely(ft == EXT4_S_IFREG) {
-            // ----- For files: path now contains the full path including filename
-            self.process_file(
-                &child_inode,
-                name,
-                path_display_buf,
-                matcher,
-                gi_stack,
-            )?;
+                dir_stack.push(DirFrame {
+                    inode_num: entry_inode,
+                    parent_len: current_dir_path_len,
+                    name_offset,
+                    name_len,
+                });
+            }
+            EXT4_S_IFREG => {
+                // ----- Regular file - search it
+                self.process_file(
+                    &child_inode,
+                    name,
+                    path_display_buf,
+                    matcher,
+                    gi_stack,
+                )?;
+            }
+            EXT4_S_IFLNK => {
+                // TODO: Process symlink targets
+                self.stats.files_encountered += 1;
+            }
+            _ => {
+                // Skip special files (devices, FIFOs, sockets, etc.)
+            }
         }
 
         self.path_buf.truncate(current_dir_path_len);
@@ -997,6 +1019,7 @@ impl RawGrepper {
         let size = (child_inode.size as usize).min(MAX_FILE_BYTE_SIZE);
         if likely(self.read_file_into_buf(child_inode, size, BufKind::Content).is_ok()) {
             self.stats.files_searched += 1;
+            self.stats.bytes_searched += self.get_buf(BufKind::Content).len();
             self.find_and_print_matches(matcher, path_display_buf)?;
         } else {
             self.stats.files_skipped_unreadable += 1;
