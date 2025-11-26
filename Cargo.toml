@@ -22,6 +22,7 @@ libc = "0.2.177"
 ignore = "0.4.25"
 phf = { version = "0.13.1", features = ["macros"] }
 bytecount = "0.6.9"
+clap = { version = "4.5", features = ["std", "help", "derive"], default-features = false }
 
 [profile.release-fast]
 inherits = "release"

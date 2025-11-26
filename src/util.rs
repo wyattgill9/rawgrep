@@ -1,4 +1,4 @@
-use crate::GitignoreFrame;
+use crate::grep::GitignoreFrame;
 
 use std::{fs, io};
 use std::path::{Path, PathBuf};
@@ -103,6 +103,10 @@ pub fn detect_partition_for_path(canonicalized_path: &Path) -> io::Result<String
             continue;
         }
 
+        // Resolve device symlinks (e.g., /dev/disk/by-uuid/...)
+        let device = fs::canonicalize(device).unwrap_or_else(|_| PathBuf::from(device));
+        let device = device.to_string_lossy();
+
         let mountpoint = unescape_mountpoint(mountpoint_escaped);
 
         match fs::canonicalize(&mountpoint) {
@@ -113,7 +117,7 @@ pub fn detect_partition_for_path(canonicalized_path: &Path) -> io::Result<String
                     // Find the longest matching mountpoint (most specific)
                     if mount_len > best_match_len {
                         best_match_len = mount_len;
-                        best_match = Some(device.to_owned());
+                        best_match = Some(device.to_string());
                     }
                 }
             }
@@ -124,7 +128,7 @@ pub fn detect_partition_for_path(canonicalized_path: &Path) -> io::Result<String
                     let mount_len = mount_path.as_os_str().len();
                     if mount_len > best_match_len {
                         best_match_len = mount_len;
-                        best_match = Some(device.to_owned());
+                        best_match = Some(device.to_string());
                     }
                 }
             }

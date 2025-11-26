@@ -1,6 +1,6 @@
 use std::io::{self, BufWriter, IsTerminal, Write};
 
-use crate::{NON_TTY_BATCH_SIZE, TTY_BATCH_SIZE};
+use crate::grep::{NON_TTY_BATCH_SIZE, TTY_BATCH_SIZE};
 
 pub struct SmoothWriter {
     writer: BufWriter<io::Stdout>,

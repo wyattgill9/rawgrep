@@ -1,4 +1,4 @@
-use crate::BINARY_CONTROL_COUNT;
+use crate::grep::BINARY_CONTROL_COUNT;
 
 #[inline(always)]
 pub fn is_binary_ext(ext: &[u8]) -> bool {
@@ -58,7 +58,7 @@ pub unsafe fn is_binary_chunk_simd_sse2(data: &[u8]) -> bool {
     let space = _mm_set1_epi8(0x20);
 
     for i in 0..chunks {
-        use crate::BINARY_CONTROL_COUNT;
+        use crate::grep::BINARY_CONTROL_COUNT;
 
         let chunk = unsafe { _mm_loadu_si128(ptr.add(i * 16) as *const __m128i) };
 
