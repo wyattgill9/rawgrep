@@ -1534,6 +1534,7 @@ impl WorkerContext<'_> {
                         path_display_buf.as_mut_vec().set_len(old_len + add);
                     }
 
+                    // @Color
                     self.output_buf.extend_from_slice(COLOR_GREEN.as_bytes());
                     self.output_buf.extend_from_slice(path_display_buf.as_bytes());
                     self.output_buf.extend_from_slice(COLOR_RESET.as_bytes());
@@ -1541,6 +1542,7 @@ impl WorkerContext<'_> {
                     found_any = true;
                 }
 
+                // @Color
                 self.output_buf.extend_from_slice(COLOR_CYAN.as_bytes());
                 let mut line_num_buf = itoa::Buffer::new();
                 let line_num = line_num_buf.format(line_num);
@@ -1557,6 +1559,7 @@ impl WorkerContext<'_> {
                     }
                     let e = e.min(display.len());
 
+                    // @Color
                     self.output_buf.extend_from_slice(&display[last..s]);
                     self.output_buf.extend_from_slice(COLOR_RED.as_bytes());
                     self.output_buf.extend_from_slice(&display[s..e]);
@@ -1671,6 +1674,7 @@ impl RawGrepper {
         let matcher = match Matcher::new(&cli.pattern) {
             Ok(m) => m,
             Err(e) => {
+                // @Color
                 eprint!("{COLOR_RED}");
                 match e.kind() {
                     io::ErrorKind::InvalidInput => {

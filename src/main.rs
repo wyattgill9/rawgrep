@@ -71,6 +71,7 @@ fn setup_signal_handler() -> Arc<AtomicBool> {
 pub struct CursorHide;
 
 impl CursorHide {
+    #[inline]
     pub fn new() -> io::Result<Self> {
         io::stdout().lock().write_all(CURSOR_HIDE.as_bytes())?;
         io::stdout().flush()?;
@@ -79,6 +80,7 @@ impl CursorHide {
 }
 
 impl Drop for CursorHide {
+    #[inline]
     fn drop(&mut self) {
         _ = io::stdout().lock().write_all(CURSOR_UNHIDE.as_bytes());
         _ = io::stdout().flush();
@@ -113,6 +115,7 @@ fn main() -> io::Result<()> {
     let mut grep = match RawGrepper::new(&device, cli) {
         Ok(ok) => ok,
         Err(e) => {
+            // @Color
             eprint!("{COLOR_RED}");
             match e.kind() {
                 io::ErrorKind::NotFound => {
@@ -139,11 +142,13 @@ fn main() -> io::Result<()> {
     let start_inode = match grep.try_resolve_path_to_inode(search_root_path) {
         Ok(ok) => ok,
         Err(e) => {
+            // @Color
             eprintln!("{COLOR_RED}error: couldn't find {search_root_path} in {device}: {e}{COLOR_RESET}");
             std::process::exit(1);
         }
     };
 
+    // @Color
     eprintln!{
         "{COLOR_CYAN}Searching{COLOR_RESET} '{device}' for pattern: {COLOR_RED}'{pattern}'{COLOR_RESET}\n",
         pattern = grep.cli.pattern
