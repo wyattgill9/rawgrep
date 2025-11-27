@@ -27,11 +27,11 @@ use memmap2::{Mmap, MmapOptions};
 
 pub type INodeNum = u32;
 
-pub const BINARY_CONTROL_COUNT: usize = 51; // tunned
+pub const BINARY_CONTROL_COUNT: usize = 51; // tuned
 pub const BINARY_PROBE_BYTE_SIZE: usize = 0x1000;
 
-pub const NON_TTY_BATCH_SIZE: usize = 0x8000; // tunned
-pub const TTY_BATCH_SIZE: usize = 0x1000; // tunned
+pub const NON_TTY_BATCH_SIZE: usize = 0x8000; // tuned
+pub const TTY_BATCH_SIZE: usize = 0x1000; // tuned
 
 pub const MAX_EXTENTS_UNTIL_SPILL: usize = 64;
 

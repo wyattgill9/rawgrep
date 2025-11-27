@@ -5,7 +5,7 @@
 ## Why is `rawgrep` the fastest?
 
 - `rawgrep` reads files DIRECTLY from your partition, completely bypassing the filesystem.
-- `rawgrep` is cache-friendly and zero-copy, simply streaming through your device and outputting the matches (in tunned batches, for the smoothness, of course).
+- `rawgrep` is cache-friendly and zero-copy, simply streaming through your device and outputting the matches (in tuned batches, for the smoothness, of course).
 
 ## Installation
 
