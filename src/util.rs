@@ -182,7 +182,7 @@ pub fn vec_into_boxed_slice_noshrink<T>(mut v: Vec<T>) -> Box<[T]> {
     core::mem::forget(v);
 
     unsafe {
-        Box::from_raw(core::slice::from_raw_parts_mut(ptr, len))
+        Box::from_raw(core::ptr::slice_from_raw_parts_mut(ptr, len))
     }
 }
 
