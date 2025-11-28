@@ -1390,7 +1390,7 @@ impl WorkerContext<'_> {
                         };
 
                         // @Speed
-                        // TODO: Dispatch on inode.file_type when possible
+                        // TODO(#3): Dispatch on inode.file_type when possible
                         let ft = child_inode.mode & EXT4_S_IFMT;
                         match ft {
                             EXT4_S_IFDIR => {
@@ -2594,4 +2594,4 @@ impl RawGrepper {
         Ok(())
     }
 }
-        
+    
