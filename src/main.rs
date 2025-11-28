@@ -1,8 +1,9 @@
-#![cfg_attr(feature = "use_nightly", allow(internal_features))]
-#![cfg_attr(feature = "use_nightly", feature(core_intrinsics))]
+#![cfg_attr(all(nightly, feature = "use_nightly"), allow(internal_features))]
+#![cfg_attr(all(nightly, feature = "use_nightly"), feature(core_intrinsics))]
 
 #![allow(
     clippy::identity_op,
+    clippy::collapsible_if,
     clippy::only_used_in_recursion
 )]
 

@@ -1,17 +1,27 @@
-#[derive(Clone)]
-pub struct FixedPathBuf<const N: usize = 0x1000> {
-    buf: [u8; N],
-    len: usize,
+use std::ops::{Deref, DerefMut};
+
+use smallvec::SmallVec;
+
+pub struct SmallPathBuf<const N: usize = 0x1000> {
+    buf: SmallVec<[u8; N]>,
+}
+
+impl<const N: usize> Deref for SmallPathBuf<N> {
+    type Target = SmallVec<[u8; N]>;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target { &self.buf }
+}
+
+impl<const N: usize> DerefMut for SmallPathBuf<N> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.buf }
 }
 
 #[allow(dead_code)]
-impl<const N: usize> FixedPathBuf<N> {
+impl<const N: usize> SmallPathBuf<N> {
     #[inline(always)]
     pub fn new() -> Self {
-        Self {
-            buf: [0; N],
-            len: 0,
-        }
+        Self { buf: SmallVec::with_capacity(N) }
     }
 
     #[inline(always)]
@@ -19,51 +29,6 @@ impl<const N: usize> FixedPathBuf<N> {
         let mut pb = Self::new();
         pb.extend_from_slice(s);
         pb
-    }
-
-    #[inline(always)]
-    pub fn push(&mut self, byte: u8) {
-        debug_assert!(self.len < N);
-        self.buf[self.len] = byte;
-        self.len += 1;
-    }
-
-    #[inline(always)]
-    pub fn extend_from_slice(&mut self, slice: &[u8]) {
-        let copy_len = slice.len();
-        debug_assert!(copy_len + self.len < N);
-        self.buf[self.len..self.len + copy_len].copy_from_slice(&slice[..copy_len]);
-        self.len += copy_len;
-    }
-
-    #[inline(always)]
-    pub fn truncate(&mut self, len: usize) {
-        self.len = len;
-    }
-
-    #[inline(always)]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    #[inline(always)]
-    pub fn clear(&mut self) {
-        self.len = 0;
-    }
-
-    #[inline(always)]
-    pub fn capacity(&self) -> usize {
-        N
-    }
-
-    #[inline(always)]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.buf[..self.len]
     }
 
     /// Returns a new FixedPathBuf with the parent directory path.
@@ -75,18 +40,18 @@ impl<const N: usize> FixedPathBuf<N> {
     ///   "foo/bar" -> "foo"
     #[inline]
     pub fn parent(&self) -> Self {
-        if self.len == 0 {
+        if self.is_empty() {
             return Self::new();
         }
 
         // Find last '/'
-        let bytes = self.as_bytes();
+        let bytes = self.as_slice();
 
         // Handle trailing slash: "/usr/bin/" -> find slash before the trailing one
-        let search_end = if bytes[self.len - 1] == b'/' {
-            self.len.saturating_sub(1)
+        let search_end = if bytes[self.len() - 1] == b'/' {
+            self.len().saturating_sub(1)
         } else {
-            self.len
+            self.len()
         };
 
         if search_end == 0 {
@@ -115,14 +80,14 @@ impl<const N: usize> FixedPathBuf<N> {
     /// Returns the last component of the path (filename or last directory)
     #[inline]
     pub fn file_name(&self) -> &[u8] {
-        if self.len == 0 {
+        if self.is_empty() {
             return &[];
         }
 
-        let bytes = self.as_bytes();
+        let bytes = self.as_slice();
 
         // Skip trailing slashes
-        let mut end = self.len;
+        let mut end = self.len();
         while end > 0 && bytes[end - 1] == b'/' {
             end -= 1;
         }

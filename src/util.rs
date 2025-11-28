@@ -1,7 +1,8 @@
-use std::sync::Arc;
 use std::{fs, io};
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
+use smallvec::SmallVec;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 #[inline(always)]
@@ -247,7 +248,7 @@ where
 // ---------------
 // Nightly implementation
 // ----------------------
-#[cfg(feature = "use_nightly")]
+#[cfg(all(feature = "use_nightly", nightly))]
 mod imp {
     use core::intrinsics;
 
@@ -265,7 +266,7 @@ mod imp {
 // ---------------
 // Stable fallback
 // ---------------
-#[cfg(not(feature = "use_nightly"))]
+#[cfg(not(all(feature = "use_nightly", nightly)))]
 mod imp {
     #[inline(always)]
     pub const fn likely(b: bool) -> bool { b }
@@ -275,5 +276,3 @@ mod imp {
 }
 
 pub use imp::*;
-use smallvec::SmallVec;
-

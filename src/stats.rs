@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, sync::atomic::{AtomicU64, Ordering}};
 
 use crate::{COLOR_BLUE, COLOR_GREEN, COLOR_RESET};
 
@@ -90,4 +90,58 @@ impl Display for Stats {
     }
 }
 
+pub struct ParallelStats {
+    pub files_encountered: AtomicU64,
+    pub files_searched: AtomicU64,
+    pub files_contained_matches: AtomicU64,
+    pub bytes_searched: AtomicU64,
+    pub dirs_encountered: AtomicU64,
+    pub dirs_skipped_common: AtomicU64,
+    pub dirs_skipped_gitignore: AtomicU64,
+    pub files_skipped_large: AtomicU64,
+    pub files_skipped_as_binary_due_to_ext: AtomicU64,
+    pub files_skipped_as_binary_due_to_probe: AtomicU64,
+    pub files_skipped_gitignore: AtomicU64,
+    pub symlinks_followed: AtomicU64,
+    pub symlinks_broken: AtomicU64,
+}
+
+impl ParallelStats {
+    pub fn new() -> Self {
+        Self {
+            files_encountered: AtomicU64::new(0),
+            files_searched: AtomicU64::new(0),
+            files_contained_matches: AtomicU64::new(0),
+            bytes_searched: AtomicU64::new(0),
+            dirs_encountered: AtomicU64::new(0),
+            dirs_skipped_common: AtomicU64::new(0),
+            dirs_skipped_gitignore: AtomicU64::new(0),
+            files_skipped_large: AtomicU64::new(0),
+            files_skipped_as_binary_due_to_ext: AtomicU64::new(0),
+            files_skipped_as_binary_due_to_probe: AtomicU64::new(0),
+            files_skipped_gitignore: AtomicU64::new(0),
+            symlinks_followed: AtomicU64::new(0),
+            symlinks_broken: AtomicU64::new(0),
+        }
+    }
+
+    pub fn to_stats(&self) -> Stats {
+        Stats {
+            files_skipped_unreadable: 0,
+            files_encountered: self.files_encountered.load(Ordering::Relaxed) as _,
+            files_searched: self.files_searched.load(Ordering::Relaxed) as _,
+            files_contained_matches: self.files_contained_matches.load(Ordering::Relaxed) as _,
+            bytes_searched: self.bytes_searched.load(Ordering::Relaxed) as _,
+            dirs_encountered: self.dirs_encountered.load(Ordering::Relaxed) as _,
+            dirs_skipped_common: self.dirs_skipped_common.load(Ordering::Relaxed) as _,
+            dirs_skipped_gitignore: self.dirs_skipped_gitignore.load(Ordering::Relaxed) as _,
+            files_skipped_large: self.files_skipped_large.load(Ordering::Relaxed) as _,
+            files_skipped_as_binary_due_to_ext: self.files_skipped_as_binary_due_to_ext.load(Ordering::Relaxed) as _,
+            files_skipped_as_binary_due_to_probe: self.files_skipped_as_binary_due_to_probe.load(Ordering::Relaxed) as _,
+            files_skipped_gitignore: self.files_skipped_gitignore.load(Ordering::Relaxed) as _,
+            symlinks_followed: self.symlinks_followed.load(Ordering::Relaxed) as _,
+            symlinks_broken: self.symlinks_broken.load(Ordering::Relaxed) as _,
+        }
+    }
+}
 
