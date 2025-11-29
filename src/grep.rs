@@ -502,14 +502,14 @@ impl WorkerContext<'_> {
         buf.reserve(size_to_read);
 
         if inode.flags & EXT4_EXTENTS_FL != 0 {
-            self.read_extents_optimized(inode, size_to_read, file_size, kind, check_and_stop_if_binary)
+            self.read_extents(inode, size_to_read, file_size, kind, check_and_stop_if_binary)
         } else {
-            self.read_direct_blocks_optimized(inode, size_to_read, file_size, kind, check_and_stop_if_binary)
+            self.read_direct_blocks(inode, size_to_read, file_size, kind, check_and_stop_if_binary)
         }
     }
 
     #[inline]
-    fn read_extents_optimized(
+    fn read_extents(
         &mut self,
         inode: &Ext4Inode,
         size_to_read: usize,
@@ -548,7 +548,7 @@ impl WorkerContext<'_> {
     }
 
     #[inline]
-    fn read_direct_blocks_optimized(
+    fn read_direct_blocks(
         &mut self,
         inode: &Ext4Inode,
         size_to_read: usize,
@@ -577,7 +577,7 @@ impl WorkerContext<'_> {
 
         let mut copied = 0;
 
-        for &block_num in &blocks {
+        for block_num in blocks {
             if copied >= size_to_read { break; }
 
             let (src_ptr, src_len) = {
