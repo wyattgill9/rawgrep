@@ -67,6 +67,10 @@ pub struct Cli {
     /// Disable colored output (force plain text)
     #[arg(long = "no-color")]
     pub no_color: bool,
+
+    /// Print matches in conventional jumpable format (for VIM, EMACS, etc)
+    #[arg(short, long)]
+    pub jump: bool,
 }
 
 impl Cli {

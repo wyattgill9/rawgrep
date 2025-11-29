@@ -1704,6 +1704,21 @@ impl WorkerContext<'_> {
                         path_display_buf.as_mut_vec().set_len(old_len + add);
                     }
 
+                    if !self.cli.jump {
+                        if should_print_color {
+                            self.output_buf.extend_from_slice(COLOR_GREEN.as_bytes());
+                        }
+                        self.output_buf.extend_from_slice(path_display_buf.as_bytes());
+                        if should_print_color {
+                            self.output_buf.extend_from_slice(COLOR_RESET.as_bytes());
+                        }
+                        self.output_buf.extend_from_slice(b":\n");
+                    }
+
+                    found_any = true;
+                }
+
+                if self.cli.jump {
                     if should_print_color {
                         self.output_buf.extend_from_slice(COLOR_GREEN.as_bytes());
                     }
@@ -1711,8 +1726,7 @@ impl WorkerContext<'_> {
                     if should_print_color {
                         self.output_buf.extend_from_slice(COLOR_RESET.as_bytes());
                     }
-                    self.output_buf.extend_from_slice(b":\n");
-                    found_any = true;
+                    self.output_buf.extend_from_slice(b":");
                 }
 
                 if should_print_color {
