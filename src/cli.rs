@@ -10,7 +10,6 @@ pub fn should_enable_ansi_coloring() -> bool {
     SHOULD_ENABLE_ANSI_COLORING.get().copied().unwrap_or(false)
 }
 
-// TODO(#4): Flag to disable ANSI coloring
 #[derive(Parser)]
 #[command(
     name = "rawgrep",
