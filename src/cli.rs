@@ -25,7 +25,6 @@ pub fn should_enable_ansi_coloring() -> bool {
 // TODO(#13): add --glob / --glob-case-insensitive / --type / --type-not
 // TODO(#16): add color modes: auto|never|always
 // TODO(#17): detect TTY for default color behavior
-// TODO(#18): add --threads N to override thread count
 // TODO(#19): add --count (only count matches)
 // TODO(#20): add --max-count N
 // TODO(#21): add --files-with-matches / --files-without-match
