@@ -15,9 +15,14 @@ rust-version = "1.85.1"
 
 [features]
 default = ["dep:mimalloc"]
-mimalloc = ["dep:mimalloc"]
 use_nightly = []
+
+# profiling
 tracy = ["tracy-client/enable"]
+
+# allocators
+mimalloc = ["dep:mimalloc"]
+dhat = ["dep:dhat"]
 
 [dependencies]
 regex = { version = "1", default-features = false, features = ["std"] }
@@ -36,6 +41,7 @@ crossbeam-deque = { version = "0.8.6", default-features = false, features = ["st
 itoa = { version = "1.0.15", default-features = false }
 fastrand = { version = "2.3.0", default-features = false, features = ["std"] }
 bytemuck = { version = "1.24", features = ["derive"] }
+dhat = { version = "0.3.3", default-features = false, optional = true }
 
 [build-dependencies]
 rustc_version = "0.2"

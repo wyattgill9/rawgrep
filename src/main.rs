@@ -7,9 +7,16 @@
     clippy::only_used_in_recursion
 )]
 
-#[cfg(feature = "mimalloc")]
+#[cfg(all(feature = "mimalloc", feature = "dhat"))]
+compile_error!("compiling `rawgrep` with both `mimalloc` and `dhat` allocators enabled, choose just one!");
+
+#[cfg(all(feature = "mimalloc", not(feature = "dhat")))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(all(feature = "dhat", not(feature = "mimalloc")))]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
 mod cli;
 mod grep;
@@ -88,6 +95,9 @@ impl Drop for CursorHide {
 }
 
 fn main() -> io::Result<()> {
+    #[cfg(feature = "dhat")]
+    let _profiler = dhat::Profiler::new_heap();
+
     let cli = Cli::parse();
 
     let search_root_path = match fs::canonicalize(&cli.search_root_path) {

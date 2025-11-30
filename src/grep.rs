@@ -138,14 +138,6 @@ pub struct Ext4Extent {
     pub len: u16,
 }
 
-pub struct BufferConfig {
-    pub output_buf: usize,
-    pub dir_buf: usize,
-    pub file_buf: usize,
-    pub gitignore_buf: usize,
-    pub extent_buf: usize,
-}
-
 mod raw {
     use super::*;
 
@@ -315,6 +307,14 @@ mod raw {
         pub ei_leaf_hi: u16,        // 0x08 - high 16 bits of physical block pointer
         pub ei_unused: u16,         // 0x0A
     }
+}
+
+pub struct BufferConfig {
+    pub output_buf: usize,
+    pub dir_buf: usize,
+    pub file_buf: usize,
+    pub gitignore_buf: usize,
+    pub extent_buf: usize,
 }
 
 enum WorkItem {
@@ -1665,8 +1665,9 @@ impl WorkerContext<'_> {
             self.output_buf.reserve(needed);
         }
 
-        let mut line_num: u32 = 1;
+        let mut line_num = 1;
         let mut line_start = 0;
+        let mut line_num_buf = itoa::Buffer::new();
 
         let should_print_color = should_enable_ansi_coloring();
 
@@ -1678,7 +1679,9 @@ impl WorkerContext<'_> {
             let line = &buf[line_start..line_end];
 
             // TODO(#25): Don't call is_match excessively
-            if self.matcher.is_match(line) {
+            let mut iter = self.matcher.find_matches(line).peekable();
+
+            if iter.peek().is_some() {
                 if !found_any {
                     //
                     // `path_display_buf` contains the `child path`,
@@ -1737,7 +1740,6 @@ impl WorkerContext<'_> {
                 if should_print_color {
                     self.output_buf.extend_from_slice(COLOR_CYAN.as_bytes());
                 }
-                let mut line_num_buf = itoa::Buffer::new();
                 let line_num = line_num_buf.format(line_num);
                 self.output_buf.extend_from_slice(line_num.as_bytes());
                 if should_print_color {
@@ -1748,7 +1750,7 @@ impl WorkerContext<'_> {
                 let display = truncate_utf8(line, 500);
                 let mut last = 0;
 
-                for (s, e) in self.matcher.find_matches(line) {
+                for (s, e) in iter {
                     if s >= display.len() { break; }
 
                     let e = e.min(display.len());
