@@ -2,7 +2,7 @@ use std::ops::{Deref, DerefMut};
 
 use smallvec::SmallVec;
 
-pub struct SmallPathBuf<const N: usize = 0x1000> {
+pub struct SmallPathBuf<const N: usize = 0x400> {
     buf: SmallVec<[u8; N]>,
 }
 
