@@ -1677,7 +1677,7 @@ impl WorkerContext<'_> {
 
             let line = &buf[line_start..line_end];
 
-            // TODO: Don't call is_match excessively
+            // TODO(#25): Don't call is_match excessively
             if self.matcher.is_match(line) {
                 if !found_any {
                     //
@@ -2707,4 +2707,3 @@ impl RawGrepper {
         Ok(())
     }
 }
-     
