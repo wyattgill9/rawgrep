@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
 use smallvec::SmallVec;
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 #[inline(always)]
 pub const fn is_dot_entry(name: &[u8]) -> bool {
@@ -13,34 +12,11 @@ pub const fn is_dot_entry(name: &[u8]) -> bool {
 
 #[inline(always)]
 pub const fn is_common_skip_dir(dir: &[u8]) -> bool {
-    matches!(dir, b"node_modules" | b"target" | b".git" | b".hg" | b".svn")
-}
-
-
-#[inline(always)]
-pub fn is_gitignored(gi: &Gitignore, path: &Path, is_dir: bool) -> bool {
-    if gi.matched(path, is_dir).is_ignore() {
-        return true;
+    matches!{
+        dir,
+        b"node_modules" | b"target" | b".git" | b".hg" | b".svn" |
+        b"dist" | b"build" | b"out" | b"bin" | b"tmp" | b".cache"
     }
-    false
-}
-
-#[inline(always)]
-pub fn build_gitignore(root: &Path) -> Option<Gitignore> {
-    let mut builder = GitignoreBuilder::new(root);
-    builder.add(root.join(".gitignore"));
-    builder.build().ok()
-}
-
-#[inline(always)]
-pub fn build_gitignore_from_bytes(parent_path: &Path, bytes: &[u8]) -> Gitignore {
-    let mut builder = GitignoreBuilder::new(parent_path);
-    for line in bytes.split(|&b| b == b'\n') {
-        if let Ok(s) = std::str::from_utf8(line) {
-            builder.add_line(None, s).ok();
-        }
-    }
-    builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
 #[inline(always)]

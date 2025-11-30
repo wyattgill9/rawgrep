@@ -1,61 +1,11 @@
-#![cfg_attr(all(nightly, feature = "use_nightly"), allow(internal_features))]
-#![cfg_attr(all(nightly, feature = "use_nightly"), feature(core_intrinsics))]
-
-#![allow(
-    clippy::identity_op,
-    clippy::collapsible_if,
-    clippy::only_used_in_recursion
-)]
-
-#[cfg(all(feature = "mimalloc", feature = "dhat"))]
-compile_error!("compiling `rawgrep` with both `mimalloc` and `dhat` allocators enabled, choose just one!");
-
-#[cfg(all(feature = "mimalloc", not(feature = "dhat")))]
-#[global_allocator]
-static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-#[cfg(all(feature = "dhat", not(feature = "mimalloc")))]
-#[global_allocator]
-static ALLOC: dhat::Alloc = dhat::Alloc;
-
-mod cli;
-mod grep;
-mod util;
-mod stats;
-mod tracy;
-mod binary;
-mod matcher;
-mod path_buf;
-
-use crate::cli::Cli;
-use crate::grep::RawGrepper;
-use crate::util::build_gitignore;
+use rawgrep::cli::Cli;
+use rawgrep::grep::RawGrepper;
+use rawgrep::{eprint_blue, eprint_green, eprintln_red, CURSOR_HIDE, CURSOR_UNHIDE};
 
 use std::fs;
 use std::sync::Arc;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-
-use smallvec::SmallVec;
-
-pub const COLOR_RED: &str = "\x1b[1;31m";
-pub const COLOR_GREEN: &str = "\x1b[1;32m";
-pub const COLOR_BLUE: &str = "\x1b[1;34m";
-pub const COLOR_CYAN: &str = "\x1b[1;36m";
-pub const COLOR_RESET: &str = "\x1b[0m";
-
-pub const CURSOR_HIDE: &str = "\x1b[?25l";
-pub const CURSOR_UNHIDE: &str = "\x1b[?25h";
-
-/// Helper used to indicate that we copy some amount of copiable data (bytes) into a newly allocated memory
-#[inline(always)]
-pub fn copy_data<A, T>(bytes: &[T]) -> SmallVec<A>
-where
-    A: smallvec::Array<Item = T>,
-    T: Copy
-{
-    SmallVec::from_slice(bytes)
-}
 
 #[inline]
 fn setup_signal_handler() -> Arc<AtomicBool> {
@@ -100,7 +50,7 @@ fn main() -> io::Result<()> {
 
     let cli = Cli::parse();
 
-    let search_root_path = match fs::canonicalize(&cli.search_root_path) {
+    let search_root_path_buf = match fs::canonicalize(&cli.search_root_path) {
         Ok(path) => path,
         Err(e) => {
             let search_root_path = &cli.search_root_path;
@@ -110,7 +60,7 @@ fn main() -> io::Result<()> {
     };
 
     let device = cli.device.as_ref().cloned().unwrap_or_else(|| {
-        match crate::util::detect_partition_for_path(search_root_path.as_ref()) {
+        match rawgrep::util::detect_partition_for_path(search_root_path_buf.as_ref()) {
             Ok(ok) => ok,
             Err(e) => {
                 eprintln_red!("error: couldn't find auto-detect partition: {e}");
@@ -119,7 +69,7 @@ fn main() -> io::Result<()> {
         }
     });
 
-    let search_root_path = search_root_path.to_string_lossy();
+    let search_root_path = search_root_path_buf.to_string_lossy();
     let search_root_path = search_root_path.as_ref();
 
     let mut grep = match RawGrepper::new(&device, cli) {
@@ -161,11 +111,14 @@ fn main() -> io::Result<()> {
 
     let _cur = CursorHide::new();
 
+    let potential_root_gitignore_path_buf = search_root_path_buf.join(".gitignore");
+    let potential_root_gitignore_path = potential_root_gitignore_path_buf.to_string_lossy();
+    let potential_root_gitignore_path = potential_root_gitignore_path.as_ref();
+
     let (cli, stats) = grep.search_parallel(
         start_inode,
-        search_root_path,
         &setup_signal_handler(),
-        build_gitignore(search_root_path.as_ref()),
+        rawgrep::ignore::build_gitignore_from_file(potential_root_gitignore_path)
     )?;
 
     if cli.stats {

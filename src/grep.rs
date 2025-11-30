@@ -5,14 +5,14 @@
 // TODO(#24): Support for searching in large file(s). (detect that)
 
 use crate::cli::{should_enable_ansi_coloring, Cli};
+use crate::ignore::{Gitignore, GitignoreChain};
 use crate::matcher::Matcher;
 use crate::path_buf::SmallPathBuf;
 use crate::stats::{ParallelStats, Stats};
 use crate::{copy_data, eprintln_red, tracy, COLOR_CYAN, COLOR_GREEN, COLOR_RED, COLOR_RESET};
 use crate::binary::{is_binary_chunk, is_binary_ext};
 use crate::util::{
-    build_gitignore_from_bytes,
-    is_common_skip_dir, is_dot_entry, is_gitignored,
+    is_common_skip_dir, is_dot_entry,
     likely, unlikely,
     truncate_utf8,
 };
@@ -28,7 +28,6 @@ use std::io::{self, BufWriter, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bytemuck::{Pod, Zeroable};
-use ignore::gitignore::Gitignore;
 use memmap2::{Mmap, MmapOptions};
 use smallvec::{SmallVec, smallvec};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -36,8 +35,8 @@ use crossbeam_deque::{Injector, Steal, Stealer, Worker as DequeWorker};
 
 pub type INodeNum = u32;
 
-pub const LARGE_DIR_THRESHOLD: usize = 1000; // Split dirs with 1000+ entries
-pub const FILE_BATCH_SIZE: usize = 500; // Process files in batches of 500
+pub const LARGE_DIR_THRESHOLD: usize = 1024; // Split dirs with 1000+ entries
+pub const FILE_BATCH_SIZE: usize = 512; // Process files in batches of 500
 
 pub const WORKER_FLUSH_BATCH: usize = 16 * 1024;
 pub const OUTPUTTER_FLUSH_BATCH: usize = 32 * 1024;
@@ -325,13 +324,13 @@ enum WorkItem {
 struct DirWork {
     inode_num: INodeNum,
     path_bytes: Arc<[u8]>,
-    gitignore: Option<Arc<Gitignore>>,
+    gitignore_chain: GitignoreChain,
     depth: u16
 }
 
 struct FileBatchWork {
     parent_path: Arc<[u8]>,
-    gitignore: Option<Arc<Gitignore>>,
+    gitignore_chain: GitignoreChain,
     // Raw directory entry data (multiple entries concatenated)
     entries: Box<[u8]>,
 }
@@ -360,7 +359,6 @@ impl Outputter {
 struct WorkerContext<'a> {
     worker_id: usize,
 
-    root_search_directory: &'a str,
     device_mmap: &'a Mmap,
     sb: &'a Ext4SuperBlock,
     cli: &'a Cli,
@@ -678,17 +676,6 @@ impl WorkerContext<'_> {
         }
     }
 
-    /// Called when either checking if a path is gitignored or printing the matches
-    #[inline(always)]
-    fn display_path_into_buf<'a>(&self, buf: &'a mut String) -> &'a str {
-        let _span = tracy::span!("WorkerContext::display_path_into_buf");
-
-        buf.clear();
-        // @Speed
-        buf.push_str(&String::from_utf8_lossy(self.path_buf.as_slice()));
-        buf.as_str()
-    }
-
     #[allow(unused)]
     #[inline(always)]
     fn buf_ptr(&self, ptr: BufFatPtr) -> &[u8] {
@@ -812,19 +799,14 @@ impl WorkerContext<'_> {
 /// impl block of gitignore helper functions
 impl WorkerContext<'_> {
     #[inline]
-    fn try_load_gitignore(
-        &mut self,
-        gi_inode_num: INodeNum,
-        path_display_buf: &str
-    ) -> Option<Gitignore> {
+    fn try_load_gitignore(&mut self, gi_inode_num: INodeNum) -> Option<Gitignore> {
         let _span = tracy::span!("WorkerContext::try_load_gitignore");
 
         if let Ok(gi_inode) = self.parse_inode(gi_inode_num) {
             let size = (gi_inode.size as usize).min(self.max_file_byte_size());
             if likely(self.read_file_into_buf(&gi_inode, size, BufKind::Gitignore, true).is_ok()) {
-                let matcher = build_gitignore_from_bytes(
-                    path_display_buf.as_ref(),
-                    &self.gitignore_buf,
+                let matcher = crate::ignore::build_gitignore_from_bytes(
+                    &self.gitignore_buf
                 );
                 return Some(matcher)
             }
@@ -1145,10 +1127,9 @@ impl WorkerContext<'_> {
 
     fn process_directory_with_stealing(
         &mut self,
-        work: DirWork,
+        mut work: DirWork,
         local: &DequeWorker<WorkItem>,
         injector: &Injector<WorkItem>,
-        path_display_buf: &mut String
     ) -> io::Result<()> {
         let _span = tracy::span!("process_directory_with_stealing");
 
@@ -1180,13 +1161,19 @@ impl WorkerContext<'_> {
         self.read_file_into_buf(&inode, dir_size, BufKind::Dir, false)?;
         self.stats.dirs_encountered.fetch_add(1, Ordering::Relaxed);
 
-        let current_gi = if !self.cli.should_ignore_gitignore() {
-            self.find_gitignore_inode_in_buf(BufKind::Dir).and_then(|gi_inode| {
-                self.display_path_into_buf(path_display_buf);
-                self.try_load_gitignore(gi_inode, path_display_buf).map(Arc::new)
-            }).or_else(|| work.gitignore.clone())
+        let gitignore_chain = if !self.cli.should_ignore_gitignore() {
+            if let Some(gi_inode) = self.find_gitignore_inode_in_buf(BufKind::Dir) {
+                if let Some(gi) = self.try_load_gitignore(gi_inode) {
+                    let old_gi = mem::take(&mut work.gitignore_chain);
+                    old_gi.with_gitignore(work.depth, gi)
+                } else {
+                    work.gitignore_chain.clone()
+                }
+            } else {
+                work.gitignore_chain.clone()
+            }
         } else {
-            work.gitignore.as_ref().map(Arc::clone)
+            work.gitignore_chain.clone()
         };
 
         let (file_count, _) = self.count_directory_entries();
@@ -1195,18 +1182,16 @@ impl WorkerContext<'_> {
         if file_count > LARGE_DIR_THRESHOLD {
             self.process_large_directory(
                 work,
-                current_gi,
+                gitignore_chain,
                 local,
                 injector,
-                path_display_buf
             )?;
         } else {
             self.process_not_large_directory(
                 work,
-                current_gi,
+                gitignore_chain,
                 local,
                 injector,
-                path_display_buf
             )?;
         }
 
@@ -1279,10 +1264,9 @@ impl WorkerContext<'_> {
     fn process_large_directory(
         &mut self,
         work: DirWork,
-        current_gi: Option<Arc<Gitignore>>,
+        gitignore_chain: GitignoreChain,
         local: &DequeWorker<WorkItem>,
         injector: &Injector<WorkItem>,
-        path_display_buf: &mut String
     ) -> io::Result<()> {
         let _span = tracy::span!("WorkerContext::process_large_directory");
 
@@ -1298,6 +1282,9 @@ impl WorkerContext<'_> {
 
         // Pre-calculate path components that don't change
         let needs_slash = !work.path_bytes.is_empty();
+        let parent_path_len = work.path_bytes.len();
+
+        let gitignore_chain_is_empty = gitignore_chain.is_empty();
 
         while offset + entry_size <= self.dir_buf.len() {
             let entry = match bytemuck::try_from_bytes::<raw::Ext4DirEntry2>(
@@ -1310,6 +1297,7 @@ impl WorkerContext<'_> {
             let entry_inode = u32::from_le(entry.inode);
             let rec_len = u16::from_le(entry.rec_len);
             let name_len = entry.name_len;
+            let file_type = entry.file_type;
 
             if rec_len == 0 {
                 break;
@@ -1328,18 +1316,40 @@ impl WorkerContext<'_> {
                     };
 
                     if likely(!is_dot_entry(name_bytes)) {
-                        let Ok(child_inode) = self.parse_inode(entry_inode) else {
-                            offset += rec_len_usize;
-                            continue;
+                        // Try to use file_type from directory entry first (fast path)
+                        // file_type constants: 1=REG, 2=DIR, 7=LINK, etc.
+                        // If file_type is 0 (unknown), fall back to inode parsing
+                        let ft = if file_type != 0 {
+                            // Fast path: use file_type from directory entry
+                            match file_type {
+                                1 => Some(EXT4_S_IFREG), // Regular file
+                                2 => Some(EXT4_S_IFDIR), // Directory
+                                _ => None, // Symlink, socket, etc. - skip or handle if needed
+                            }
+                        } else {
+                            // Slow path: parse inode to get type
+                            None
                         };
 
-                        let ft = child_inode.mode & EXT4_S_IFMT;
+                        let ft = if let Some(ft) = ft {
+                            ft
+                        } else {
+                            // Unknown type - must parse inode
+                            let Ok(child_inode) = self.parse_inode(entry_inode) else {
+                                offset += rec_len_usize;
+                                continue;
+                            };
+                            let ft = child_inode.mode & EXT4_S_IFMT;
+                            ft
+                        };
+
                         match ft {
                             EXT4_S_IFDIR => {
                                 if !is_common_skip_dir(name_bytes) {
+                                    // Build child path once
                                     let mut child_path: SmallVec<[u8; 512]> = SmallVec::new();
                                     child_path.reserve_exact(
-                                        work.path_bytes.len() + needs_slash as usize + name_len as usize
+                                        parent_path_len + needs_slash as usize + name_len as usize
                                     );
                                     child_path.extend_from_slice(&work.path_bytes);
                                     if needs_slash {
@@ -1347,12 +1357,21 @@ impl WorkerContext<'_> {
                                     }
                                     child_path.extend_from_slice(name_bytes);
 
+                                    // CHECK GITIGNORE FOR THE DIRECTORY
+                                    if !self.cli.should_ignore_gitignore() && !gitignore_chain_is_empty {
+                                        if gitignore_chain.is_ignored(&child_path, true) {
+                                            self.stats.dirs_skipped_gitignore.fetch_add(1, Ordering::Relaxed);
+                                            offset += rec_len_usize;
+                                            continue; // Skip this entire directory!
+                                        }
+                                    }
+
                                     subdirs.push(DirWork {
                                         inode_num: entry_inode,
                                         path_bytes: crate::util::smallvec_into_arc_slice_noshrink(
                                             child_path
                                         ),
-                                        gitignore: current_gi.as_ref().map(Arc::clone),
+                                        gitignore_chain: gitignore_chain.clone(),
                                         depth: work.depth + 1,
                                     });
                                 }
@@ -1367,7 +1386,7 @@ impl WorkerContext<'_> {
                                 if files_in_batch >= FILE_BATCH_SIZE {
                                     local.push(WorkItem::FileBatch(FileBatchWork {
                                         parent_path: Arc::clone(&work.path_bytes),
-                                        gitignore: current_gi.as_ref().map(Arc::clone),
+                                        gitignore_chain: gitignore_chain.clone(),
                                         entries: crate::util::smallvec_into_boxed_slice_noshrink(
                                             mem::take(&mut current_batch)
                                         )
@@ -1387,7 +1406,7 @@ impl WorkerContext<'_> {
         if files_in_batch > 0 {
             local.push(WorkItem::FileBatch(FileBatchWork {
                 parent_path: Arc::clone(&work.path_bytes),
-                gitignore: current_gi.as_ref().map(Arc::clone),
+                gitignore_chain: gitignore_chain.clone(),
                 entries: crate::util::smallvec_into_boxed_slice_noshrink(current_batch),
             }));
         }
@@ -1398,7 +1417,7 @@ impl WorkerContext<'_> {
         }
 
         for subdir in subdirs {
-            self.process_directory_with_stealing(subdir, local, injector, path_display_buf)?;
+            self.process_directory_with_stealing(subdir, local, injector)?;
         }
 
         Ok(())
@@ -1407,12 +1426,11 @@ impl WorkerContext<'_> {
     fn process_not_large_directory(
         &mut self,
         work: DirWork,
-        current_gi: Option<Arc<Gitignore>>,
+        gitignore_chain: GitignoreChain,
         local: &DequeWorker<WorkItem>,
         injector: &Injector<WorkItem>,
-        path_display_buf: &mut String
     ) -> io::Result<()> {
-        let _span = tracy::span!("WorkerContext::process_large_directory");
+        let _span = tracy::span!("WorkerContext::process_not_large_directory");
 
         let mut subdirs = SmallVec::<[DirWork; 16]>::new();
         let mut offset = 0;
@@ -1422,6 +1440,7 @@ impl WorkerContext<'_> {
 
         // Pre-calculate path components that don't change
         let needs_slash = !work.path_bytes.is_empty();
+        let parent_path_len = work.path_bytes.len();
 
         while offset + entry_size <= self.dir_buf.len() {
             let entry = match bytemuck::try_from_bytes::<raw::Ext4DirEntry2>(
@@ -1434,6 +1453,7 @@ impl WorkerContext<'_> {
             let entry_inode = u32::from_le(entry.inode);
             let rec_len = u16::from_le(entry.rec_len);
             let name_len = entry.name_len;
+            let file_type = entry.file_type;
 
             if (rec_len == 0 || rec_len < entry_size as u16) ||
                 offset + rec_len as usize > self.dir_buf.len()
@@ -1454,22 +1474,51 @@ impl WorkerContext<'_> {
                     };
 
                     if !is_dot_entry(name_bytes) {
-                        // Unknown type - parse inode to determine
-                        let Ok(child_inode) = self.parse_inode(entry_inode) else {
-                            offset += rec_len_usize;
-                            continue;
+                        // Try to use file_type from directory entry first (fast path)
+                        // file_type constants: 1=REG, 2=DIR, 7=LINK, etc.
+                        // If file_type is 0 (unknown), fall back to inode parsing
+                        let ft = if file_type != 0 {
+                            // Fast path: use file_type from directory entry
+                            match file_type {
+                                1 => Some(EXT4_S_IFREG), // Regular file
+                                2 => Some(EXT4_S_IFDIR), // Directory
+                                _ => None, // Symlink, socket, etc. - skip or handle if needed
+                            }
+                        } else {
+                            // Slow path: parse inode to get type
+                            None
                         };
 
-                        // @Speed
-                        // TODO(#3): Dispatch on inode.file_type when possible
-                        let ft = child_inode.mode & EXT4_S_IFMT;
+                        let (child_inode, ft) = if let Some(ft) = ft {
+                            // We know the type, but still need inode for file processing
+                            if ft == EXT4_S_IFREG {
+                                // Parse inode only if we're going to process the file
+                                let Ok(child_inode) = self.parse_inode(entry_inode) else {
+                                    offset += rec_len_usize;
+                                    continue;
+                                };
+                                (Some(child_inode), ft)
+                            } else {
+                                // For directories, we don't need the inode yet
+                                (None, ft)
+                            }
+                        } else {
+                            // Unknown type - must parse inode
+                            let Ok(child_inode) = self.parse_inode(entry_inode) else {
+                                offset += rec_len_usize;
+                                continue;
+                            };
+                            let ft = child_inode.mode & EXT4_S_IFMT;
+                            (Some(child_inode), ft)
+                        };
+
                         match ft {
                             EXT4_S_IFDIR => {
                                 if !is_common_skip_dir(name_bytes) {
-                                    // @Constant
+                                    // Build child path once
                                     let mut child_path: SmallVec<[u8; 512]> = SmallVec::new();
                                     child_path.reserve_exact(
-                                        work.path_bytes.len() + needs_slash as usize + name_len as usize
+                                        parent_path_len + needs_slash as usize + name_len as usize
                                     );
                                     child_path.extend_from_slice(&work.path_bytes);
                                     if needs_slash {
@@ -1477,25 +1526,45 @@ impl WorkerContext<'_> {
                                     }
                                     child_path.extend_from_slice(name_bytes);
 
+                                    // CHECK GITIGNORE FOR THE DIRECTORY
+                                    if !self.cli.should_ignore_gitignore() && !gitignore_chain.is_empty() {
+                                        if gitignore_chain.is_ignored(&child_path, true) {
+                                            self.stats.dirs_skipped_gitignore.fetch_add(1, Ordering::Relaxed);
+                                            offset += rec_len_usize;
+                                            continue; // Skip this entire directory!
+                                        }
+                                    }
+
                                     subdirs.push(DirWork {
                                         inode_num: entry_inode,
                                         path_bytes: crate::util::smallvec_into_arc_slice_noshrink(
                                             child_path
                                         ),
-                                        gitignore: current_gi.as_ref().map(Arc::clone),
+                                        gitignore_chain: gitignore_chain.clone(),
                                         depth: work.depth + 1,
                                     });
                                 }
                             }
                             EXT4_S_IFREG => {
-                                // @Speed
-                                let name_bytes = name_bytes.to_vec();
+                                // We already parsed the inode above if file_type was known
+                                let child_inode = if let Some(inode) = child_inode {
+                                    inode
+                                } else {
+                                    // This shouldn't happen, but handle it just in case
+                                    let Ok(inode) = self.parse_inode(entry_inode) else {
+                                        offset += rec_len_usize;
+                                        continue;
+                                    };
+                                    inode
+                                };
+
+                                // @StackLarge @Constant
+                                let name_bytes: SmallVec<[_; 512]> = copy_data(name_bytes);
                                 self.process_file(
                                     &child_inode,
                                     &name_bytes,
                                     &work.path_bytes,
-                                    current_gi.as_deref(),
-                                    path_display_buf
+                                    &gitignore_chain,
                                 )?;
 
                                 if self.output_buf.len() > WORKER_FLUSH_BATCH {
@@ -1517,17 +1586,13 @@ impl WorkerContext<'_> {
         }
 
         for subdir in subdirs {
-            self.process_directory_with_stealing(subdir, local, injector, path_display_buf)?;
+            self.process_directory_with_stealing(subdir, local, injector)?;
         }
 
         Ok(())
     }
 
-    fn process_file_batch(
-        &mut self,
-        batch: FileBatchWork,
-        path_display_buf: &mut String
-    ) -> io::Result<()> {
+    fn process_file_batch(&mut self, batch: FileBatchWork) -> io::Result<()> {
         let _span = tracy::span!("process_file_batch");
 
         let parent_path_len = batch.parent_path.len();
@@ -1573,8 +1638,7 @@ impl WorkerContext<'_> {
                 &inode,
                 name_bytes,
                 &batch.parent_path,
-                batch.gitignore.as_deref(),
-                path_display_buf
+                &batch.gitignore_chain,
             )?;
 
             if self.output_buf.len() > WORKER_FLUSH_BATCH {
@@ -1590,8 +1654,7 @@ impl WorkerContext<'_> {
         inode: &Ext4Inode,
         file_name: &[u8],
         parent_path: &[u8],
-        gitignore: Option<&Gitignore>,
-        path_display_buf: &mut String
+        gitignore_chain: &GitignoreChain,
     ) -> io::Result<()> {
         let _span = tracy::span!("WorkerContext::process_file_not_batch");
 
@@ -1607,13 +1670,10 @@ impl WorkerContext<'_> {
             return Ok(());
         }
 
-        if !self.cli.should_ignore_gitignore() {
-            if let Some(gi) = gitignore {
-                self.display_path_into_buf(path_display_buf);
-                if is_gitignored(gi, path_display_buf.as_ref(), false) {
-                    self.stats.files_skipped_gitignore.fetch_add(1, Ordering::Relaxed);
-                    return Ok(());
-                }
+        if !self.cli.should_ignore_gitignore() && !gitignore_chain.is_empty() {
+            if gitignore_chain.is_ignored(self.path_buf.as_ref(), false) {
+                self.stats.files_skipped_gitignore.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
             }
         }
 
@@ -1639,8 +1699,7 @@ impl WorkerContext<'_> {
 
                 // Only build display path if we have matches
                 if self.matcher.is_match(&self.file_buf) {
-                    self.display_path_into_buf(path_display_buf);
-                    self.find_and_print_matches(path_display_buf)?;
+                    self.find_and_print_matches()?;
                 }
             }
             false => {
@@ -1652,7 +1711,7 @@ impl WorkerContext<'_> {
     }
 
     #[inline]
-    fn find_and_print_matches(&mut self, path_display_buf: &mut String) -> io::Result<()> {
+    fn find_and_print_matches(&mut self) -> io::Result<()> {
         let _span = tracy::span!("find_and_print_matches_fast");
 
         let mut found_any = false;
@@ -1683,40 +1742,19 @@ impl WorkerContext<'_> {
 
             if iter.peek().is_some() {
                 if !found_any {
-                    //
-                    // `path_display_buf` contains the `child path`,
-                    //  e.g. the path to the file without the root search directory.
-                    //
-
-                    let root = self.root_search_directory.as_bytes();
-                    let root_len = root.len();
-                    let ends_with_slash = root.last() == Some(&b'/');
-
-                    let add = root_len + (!ends_with_slash as usize); // total bytes to insert
-                    let old_len = path_display_buf.len();
-
-                    path_display_buf.reserve(add);
-
-                    unsafe {
-                        let ptr = path_display_buf.as_mut_ptr();
-
-                        // move tail bytes forward must copy backwards to avoid overlap corruption
-                        core::ptr::copy(ptr, ptr.add(add), old_len);
-
-                        core::ptr::copy_nonoverlapping(root.as_ptr(), ptr, root_len);
-
-                        if !ends_with_slash {
-                            *ptr.add(root_len) = b'/';
-                        }
-
-                        path_display_buf.as_mut_vec().set_len(old_len + add);
-                    }
-
                     if !self.cli.jump {
                         if should_print_color {
                             self.output_buf.extend_from_slice(COLOR_GREEN.as_bytes());
                         }
-                        self.output_buf.extend_from_slice(path_display_buf.as_bytes());
+                        {
+                            let root = self.cli.search_root_path.as_bytes();
+                            let ends_with_slash = root.last() == Some(&b'/');
+                            self.output_buf.extend_from_slice(root);
+                            if !ends_with_slash {
+                                self.output_buf.push(b'/');
+                            }
+                            self.output_buf.extend_from_slice(&self.path_buf);
+                        }
                         if should_print_color {
                             self.output_buf.extend_from_slice(COLOR_RESET.as_bytes());
                         }
@@ -1730,7 +1768,16 @@ impl WorkerContext<'_> {
                     if should_print_color {
                         self.output_buf.extend_from_slice(COLOR_GREEN.as_bytes());
                     }
-                    self.output_buf.extend_from_slice(path_display_buf.as_bytes());
+                    // @Cutnpaste from above
+                    {
+                        let root = self.cli.search_root_path.as_bytes();
+                        let ends_with_slash = root.last() == Some(&b'/');
+                        self.output_buf.extend_from_slice(root);
+                        if !ends_with_slash {
+                            self.output_buf.push(b'/');
+                        }
+                        self.output_buf.extend_from_slice(&self.path_buf);
+                    }
                     if should_print_color {
                         self.output_buf.extend_from_slice(COLOR_RESET.as_bytes());
                     }
@@ -1904,15 +1951,12 @@ impl RawGrepper {
     pub fn search_parallel(
         self,
         root_inode: INodeNum,
-        root_search_directory: &str,
         running: &AtomicBool,
-        root_gitignore: Option<Gitignore>,
+        root_gi: Option<Gitignore>,
     ) -> io::Result<(Cli, Stats)> {
         let device_mmap = &self.device_mmap;
         let matcher = &self.matcher;
         let stats = &ParallelStats::new();
-
-        let root_gi = root_gitignore.map(Arc::new);
 
         let active_workers = &AtomicUsize::new(0);
         let quit_now = &AtomicBool::new(false);
@@ -1923,7 +1967,7 @@ impl RawGrepper {
         injector.push(WorkItem::Directory(DirWork {
             inode_num: root_inode,
             path_bytes: Arc::default(),
-            gitignore: root_gi,
+            gitignore_chain: root_gi.map(GitignoreChain::from_root).unwrap_or_default(),
             depth: 0,
         }));
 
@@ -1958,7 +2002,6 @@ impl RawGrepper {
                     let mut worker = WorkerContext {
                         worker_id,
 
-                        root_search_directory,
                         device_mmap,
                         sb,
                         cli,
@@ -1978,9 +2021,6 @@ impl RawGrepper {
 
                     let mut consecutive_steals = 0;
                     let mut idle_iterations = 0;
-
-                    // @Constant
-                    let mut path_display_buf = String::with_capacity(0x1000);
 
                     loop {
                         if quit_now.load(Ordering::Relaxed) || !running.load(Ordering::Relaxed) {
@@ -2005,11 +2045,10 @@ impl RawGrepper {
                                             dir_work,
                                             &local_worker,
                                             injector,
-                                            &mut path_display_buf
                                         );
                                     }
                                     WorkItem::FileBatch(batch_work) => {
-                                        _ = worker.process_file_batch(batch_work, &mut path_display_buf);
+                                        _ = worker.process_file_batch(batch_work);
                                     }
                                 }
 
