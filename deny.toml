@@ -3,7 +3,8 @@
 
 [graph]
 targets = ["x86_64-unknown-linux-gnu"]
-all-features = true
+# Don't use all-features because small/full are mutually exclusive
+# Default features will be used (which includes 'full')
 
 # Security advisories
 [advisories]
