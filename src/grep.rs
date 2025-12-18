@@ -1066,6 +1066,7 @@ impl WorkerContext<'_> {
                 // 4. The returned `&[u8]` slices are used only within the duration of this call and are
                 //    never stored, returned, or kept past recursion boundaries.
                 // 5. No other code is allowed to obtain a mutable reference to the mmap contents.
+                // @BorrowHack
                 let block_data = unsafe {
                     let zelf: *const Self = self;
                     (&*zelf).get_block(child_block)
@@ -1280,6 +1281,7 @@ impl WorkerContext<'_> {
         let mut file_entries: SmallVec<[_; 64]> = SmallVec::new();
 
         for entry in entries {
+            // @BorrowHack
             let name_bytes = unsafe {
                 let zelf: *mut Self = self;
                 (&*zelf).dir_buf.get_unchecked(
@@ -2498,6 +2500,7 @@ impl RawGrepper {
                 // 4. The returned `&[u8]` slices are used only within the duration of this call and are
                 //    never stored, returned, or kept past recursion boundaries.
                 // 5. No other code is allowed to obtain a mutable reference to the mmap contents.
+                // @BorrowHack
                 let block_data = unsafe {
                     let zelf: *const Self = self;
                     (&*zelf).get_block(child_block)
