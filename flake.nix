@@ -8,46 +8,58 @@
 
   outputs = {
     nixpkgs,
-    crane,
-    ...
-  }: let
-    system = "x86_64-linux";
-    pkgs = nixpkgs.legacyPackages.${system};
-    craneLib = crane.mkLib pkgs;
+      crane,
+      flake-utils,
+      ...
+  }:
+    flake-utils.lib.eachDefaultSystem (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+      craneLib = crane.mkLib pkgs;
 
-    src = craneLib.cleanCargoSource ./.;
+      src = craneLib.cleanCargoSource ./.;
 
-    commonArgs = {
-      inherit src;
-      strictDeps = true;
+      commonArgs = {
+        inherit src;
+        strictDeps = true;
 
-      nativeBuildInputs = [
-        pkgs.capnproto
-      ];
+        nativeBuildInputs = [
+          pkgs.capnproto
+        ];
 
-      buildInputs = [];
-    };
+        buildInputs = [];
+      };
 
-    cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-    rawgrep = craneLib.buildPackage (commonArgs // {
-      inherit cargoArtifacts;
+      rawgrep = craneLib.buildPackage (commonArgs // {
+        inherit cargoArtifacts;
+
+        meta = with pkgs.lib; {
+          description = "The fastest grep in the world";
+          homepage = "https://github.com/rakivo/rawgrep";
+          license = licenses.mit;
+          maintainers = [];
+        };
+      });
+    in {
+      packages.default = rawgrep;
+
+      apps.default = {
+        type = "app";
+        program = "${rawgrep}/bin/rawgrep";
+        meta.description = "Run rawgrep";
+      };
+
+      devShells.default = pkgs.mkShell {
+        inputsFrom = [rawgrep];
+
+        buildInputs = with pkgs; [
+          rustc
+          cargo
+          rust-analyzer
+          rustfmt
+          clippy
+        ];
+      };
     });
-  in {
-    packages.${system} = {
-      default = rawgrep;
-    };
-
-    devShells.${system}.default = pkgs.mkShell {
-      inputsFrom = [rawgrep];
-
-      buildInputs = with pkgs; [
-        rustc
-        cargo
-        rust-analyzer
-        rustfmt
-        clippy
-      ];
-    };
-  };
 }
