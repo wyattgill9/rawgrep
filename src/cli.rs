@@ -1,5 +1,3 @@
-use crate::grep::BufferConfig;
-
 use std::sync::OnceLock;
 use std::num::NonZeroUsize;
 
@@ -10,6 +8,14 @@ pub static SHOULD_ENABLE_ANSI_COLORING: OnceLock<bool> = OnceLock::new();
 #[inline(always)]
 pub fn should_enable_ansi_coloring() -> bool {
     SHOULD_ENABLE_ANSI_COLORING.get().copied().unwrap_or(false)
+}
+
+pub struct BufferConfig {
+    pub output_buf: usize,
+    pub dir_buf: usize,
+    pub file_buf: usize,
+    pub gitignore_buf: usize,
+    pub extent_buf: usize,
 }
 
 // TODO(#7): add -v / --invert-match (print non-matching lines)

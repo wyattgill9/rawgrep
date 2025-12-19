@@ -31,6 +31,8 @@ pub mod util;
 pub mod stats;
 pub mod tracy;
 pub mod ignore;
+pub mod parser;
+pub mod worker;
 pub mod binary;
 pub mod matcher;
 pub mod path_buf;

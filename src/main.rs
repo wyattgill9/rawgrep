@@ -72,7 +72,7 @@ fn main() -> io::Result<()> {
     let search_root_path = search_root_path_buf.to_string_lossy();
     let search_root_path = search_root_path.as_ref();
 
-    let mut grep = match RawGrepper::new(&device, cli) {
+    let grep = match RawGrepper::new(&device, &cli) {
         Ok(ok) => ok,
         Err(e) => {
             match e.kind() {
@@ -107,7 +107,7 @@ fn main() -> io::Result<()> {
     eprint_blue!("Searching ");
     eprint_green!("'{device}' ");
     eprint_blue!("for pattern: ");
-    eprintln_red!("'{pattern}'", pattern = grep.cli.pattern);
+    eprintln_red!("'{pattern}'", pattern = cli.pattern);
 
     let _cur = CursorHide::new();
 
@@ -115,7 +115,7 @@ fn main() -> io::Result<()> {
     let potential_root_gitignore_path = potential_root_gitignore_path_buf.to_string_lossy();
     let potential_root_gitignore_path = potential_root_gitignore_path.as_ref();
 
-    let (cli, stats) = grep.search_parallel(
+    let stats = grep.search_parallel(
         start_inode,
         &setup_signal_handler(),
         rawgrep::ignore::build_gitignore_from_file(potential_root_gitignore_path)
