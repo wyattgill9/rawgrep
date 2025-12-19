@@ -1,4 +1,5 @@
 // PINNED TODOs:
+//   TODO(#28): Daemon mode
 //
 // TODO(#1): Implement symlinks
 // TODO(#24): Support for searching in large file(s). (detect that)
