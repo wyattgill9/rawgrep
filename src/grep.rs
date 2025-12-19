@@ -1,5 +1,4 @@
 // PINNED TODOs:
-//   TODO(#26): `ignore` allocates too much, maybe we're not using it the right way
 //
 // TODO(#1): Implement symlinks
 // TODO(#24): Support for searching in large file(s). (detect that)
