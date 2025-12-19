@@ -143,6 +143,26 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - [ ] Symlink support
 - [ ] Support for more filesystems (btrfs, maybe even NTFS/APFS)
 
+## Emacs Integration
+
+To use rawgrep from Emacs with jumpable locations:
+
+1. Download `emacs/rawgrep.el` and place it in your load path
+2. Add to your `.emacs` or `init.el`:
+```elisp
+(require 'rawgrep)
+(global-set-key (kbd "M-e") 'rawgrep)
+```
+
+Or if you use `use-package`:
+```elisp
+(use-package rawgrep
+  :load-path "path/to/rawgrep.el"
+  :bind ("M-e" . rawgrep))
+```
+
+Works exactly like `'grep-find` but better.
+
 ## FAQ
 
 **Q: Is this safe to use?**
