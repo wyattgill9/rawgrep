@@ -26,6 +26,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 pub mod cli;
 pub mod grep;
+pub mod ext4;
 pub mod util;
 pub mod stats;
 pub mod tracy;
