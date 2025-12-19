@@ -133,7 +133,7 @@ impl Cli {
     /// Returns true if .gitignore files should be ignored
     #[inline(always)]
     pub const fn should_ignore_gitignore(&self) -> bool {
-        self.unrestricted >= 2 || self.no_ignore || self.all
+        self.unrestricted >= 1 || self.no_ignore || self.all
     }
 
     /// Returns true if binary files should be searched

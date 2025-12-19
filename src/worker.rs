@@ -59,7 +59,6 @@ pub const BINARY_PROBE_BYTE_SIZE: usize = 0x1000; // @Tune
 
 pub const MAX_EXTENTS_UNTIL_SPILL: usize = 64; // @Tune
 
-pub const __MAX_DIR_BYTE_SIZE: usize = 16 * 1024 * 1024; // @Tune
 pub const __MAX_FILE_BYTE_SIZE: usize = 8 * 1024 * 1024; // @Tune
 
 pub enum WorkItem {
@@ -158,15 +157,6 @@ impl<'a> WorkerContext<'a> {
     }
 
     #[inline(always)]
-    const fn max_dir_byte_size(&self) -> usize {
-        if self.cli.should_ignore_size_filter() {
-            usize::MAX
-        } else {
-            __MAX_DIR_BYTE_SIZE
-        }
-    }
-
-    #[inline(always)]
     const fn get_buf(&self, kind: BufKind) -> &Vec<u8> {
         match kind {
             BufKind::File      => &self.buffers.file,
@@ -210,7 +200,7 @@ impl WorkerContext<'_> {
             }
         }
 
-        let dir_size = (inode.size as usize).min(self.max_dir_byte_size());
+        let dir_size = inode.size as usize;
         self.buffers.read_file_into_buf(&inode, dir_size, BufKind::Dir, false, &self.ext4)?;
         self.stats.dirs_encountered += 1;
 
