@@ -28,7 +28,7 @@
         // {
           inherit cargoArtifacts;
           meta = with pkgs.lib; {
-            description = "The fastest grep in the world";
+            description = "Grep at the speed of raw disk";
             homepage = "https://github.com/rakivo/rawgrep";
             license = licenses.mit;
             maintainers = [];

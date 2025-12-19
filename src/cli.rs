@@ -39,7 +39,7 @@ pub struct BufferConfig {
 #[derive(Parser)]
 #[command(
     name = "rawgrep",
-    about = "The fastest grep in the world",
+    about = "Grep at the speed of raw disk",
     long_about = None,
     version = "1.0",
     arg_required_else_help = true,

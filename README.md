@@ -1,12 +1,11 @@
 # rawgrep
 
-**The fastest grep in the world** - search text by reading filesystems directly from raw block devices.
+**Grep at the speed of raw disk** - search text by reading data directly from raw block devices.
 
-## Why is `rawgrep` the fastest?
+## How is `rawgrep` so fast?
 
 - `rawgrep` reads files DIRECTLY from your partition, completely bypassing the filesystem.
 - `rawgrep` is cache-friendly and insanely memory efficient, simply streaming through your device and outputting the matches.
-- `rawgrep` uses aggressive work-stealing parallelism that automatically load-balances across all CPU cores.
 
 ## Installation
 
@@ -112,8 +111,8 @@ This capability grants exactly **one** permission: bypass file read permission c
 You can verify what capabilities the binary has:
 
 ```bash
-getcap ./target/release/rawgrep
-# Output: ./target/release/rawgrep = cap_dac_read_search+eip
+getcap ./target/release-fast/rawgrep
+# Output: ./target/release-fast/rawgrep = cap_dac_read_search+eip
 ```
 
 ### Removing Capabilities
@@ -121,7 +120,7 @@ getcap ./target/release/rawgrep
 If you want to revoke the capability and go back to using `sudo`:
 
 ```bash
-sudo setcap -r ./target/release/rawgrep
+sudo setcap -r ./target/release-fast/rawgrep
 ```
 
 ## Limitations (IMPORTANT)
@@ -138,13 +137,19 @@ sudo setcap -r ./target/release/rawgrep
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## Roadmap
+
+- [ ] Daemon mode with eBPF filesystem hooks for hot cache performance
+- [ ] Symlink support
+- [ ] Support for more filesystems (btrfs, maybe even NTFS/APFS)
+
 ## FAQ
 
 **Q: Is this safe to use?**
 A: Yes. The tool only reads data and never writes. The `CAP_DAC_READ_SEARCH` capability is narrowly scoped.
 
-**Q: Why is it faster than ripgrep?**
-A: By reading directly from the block device, we bypass the kernel's VFS layer, page cache, and filesystem overhead.
+**Q: Is rawgrep faster than [ripgrep](https://github.com/BurntSushi/ripgrep)?**
+A: Cold cache: yes. Hot cache: rawgrep wins on large datasets, ripgrep may edge ahead on small ones. eBPF daemon mode is planned to address this.
 
 **Q: Can I use this on other filesystems?**
 A: Currently only ext4 is supported. Support for other filesystems may be added in the future. (Motivate me with stars)

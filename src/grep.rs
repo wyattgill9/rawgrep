@@ -141,7 +141,7 @@ impl<'a> RawGrepper<'a> {
             depth: 0,
         }));
 
-        let threads = self.cli.threads.get().min(12);
+        let threads = self.cli.threads.get(); // @Constant @Tune
 
         let workers = (0..threads)
             .map(|_| DequeWorker::new_lifo())
