@@ -574,6 +574,18 @@ impl Parser {
 
         self.copy_extents_to_buf(&extents, size_to_read, kind, ext4);
 
+        //
+        //
+        //
+        // Release mmap pages back to OS after copying
+        // @Constant @Tune - threshold for when madvise overhead is worth it
+        //
+        //
+        //
+        if size_to_read >= 64 * 1024 {
+            Self::release_extent_pages(&extents, size_to_read, ext4);
+        }
+
         self.get_buf_mut(kind).truncate(size_to_read);
         Ok(true)
     }
@@ -612,7 +624,7 @@ impl Parser {
 
         let mut copied = 0;
 
-        for block_num in blocks {
+        for &block_num in &blocks {
             if copied >= size_to_read { break; }
 
             let (src_ptr, src_len) = {
@@ -698,6 +710,37 @@ impl Parser {
                     libc::MADV_WILLNEED,
                 );
             }
+        }
+    }
+
+    /// Release extent pages back to OS after reading (MADV_DONTNEED)
+    #[inline]
+    fn release_extent_pages(extents: &[Ext4Extent], size_to_read: usize, ext4: &Ext4Context) {
+        let block_size = ext4.sb.block_size as usize;
+        let mmap_len = ext4.device_mmap.len();
+        let mut remaining = size_to_read;
+
+        for extent in extents {
+            if remaining == 0 { break }
+
+            let extent_bytes = extent.len as usize * block_size;
+            let bytes_to_release = extent_bytes.min(remaining);
+            let blocks_to_release = bytes_to_release.div_ceil(block_size);
+
+            let offset = extent.start as usize * block_size;
+            let length = blocks_to_release * block_size;
+
+            if offset + length <= mmap_len {
+                unsafe {
+                    libc::madvise(
+                        ext4.device_mmap.as_ptr().add(offset) as *mut _,
+                        length,
+                        libc::MADV_FREE,
+                    );
+                }
+            }
+
+            remaining = remaining.saturating_sub(extent_bytes);
         }
     }
 
